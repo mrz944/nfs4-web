@@ -1,0 +1,3 @@
+#!/bin/sh
+# shorthand: ./re <pe> <cmd> args...
+exec "$(dirname "$0")/.venv/bin/python" -I "$(dirname "$0")/tools/retool.py" "$@"

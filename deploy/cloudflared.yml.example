@@ -1,0 +1,8 @@
+# Copy to build/cloudflare/config.yml and replace TUNNEL_UUID and credentials-file.
+tunnel: TUNNEL_UUID
+credentials-file: /ABSOLUTE/PATH/TO/nfs4-webgl/build/cloudflare/credentials.json
+
+ingress:
+  - hostname: nfs4.xyz
+    service: http://127.0.0.1:8084
+  - service: http_status:404

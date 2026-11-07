@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFS4 High Stakes</title>
+<meta name="description" content="Need for Speed: High Stakes (1999) recompiled to run in your browser. Original handling, tracks, cops and music, no install, online races with friends.">
+<meta name="theme-color" content="#02050f">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="NFS4 High Stakes">
+<meta property="og:title" content="NFS4 High Stakes, in your browser">
+<meta property="og:description" content="The 1999 classic, recompiled for the web. No install, online races with friends.">
+<!--
+  Look: the game's own 1999 front end. Near-black navy, deep blue panels with a glossy rim and a
+  folder tab in the corner, pill buttons with an aqua crescent on the left end, white italic
+  lowercase titles with a teal glow. The emblem (a poker chip with a rev counter: high stakes) and
+  the backdrop are drawn here on canvases; no EA logos or artwork are shipped with this page.
+  Headings use Russo One (SIL OFL, fonts/), running text Verdana / Tahoma like a 1999 PC.
+-->
+<style>
+  @font-face { font-family: "Russo One"; font-weight: 400; font-display: block; src: url(fonts/russo-one-latin-400-normal.woff2) format("woff2"); }
+  :root {
+    --night: #02050f; --ink: #050b24; --navy: #0a1640; --deep: #0f2266; --blue: #1c3fb0; --royal: #2f62e6; --rim: #5f8dff; --ice: #b9d2ff;
+    --aqua: #3ef2d0; --teal: #19b8a8; --cyan: #7ff6ff; --amber: #ffc23a; --red: #ff4a3d;
+    --text: #e6eeff; --muted: #8ea4d8; --err: #ff6a5a; --ok: #46f0a0;
+    --head: "Russo One", "Arial Black", Tahoma, sans-serif;
+    --ui: Verdana, Tahoma, "DejaVu Sans", Geneva, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; min-height: 100%; background: var(--night); color: var(--text); font: 13px/1.55 var(--ui); }
+  a { color: var(--cyan); }
+  ::selection { background: var(--aqua); color: var(--ink); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ------------------------------------------------------------ backdrop */
+  #bg { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; background: var(--night); }
+  #bg canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #bg .scan { position: absolute; inset: 0; background: repeating-linear-gradient(0deg, rgba(0, 0, 0, .22) 0 1px, transparent 1px 3px); }
+
+  /* --------------------------------------------------------------- frame */
+  #setup-wrap { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; max-width: 1100px; margin: 0 auto; padding: 14px 16px 10px; }
+  header { display: flex; align-items: center; gap: 14px; min-height: 104px; }
+  #logo { display: block; width: 104px; height: 104px; flex: none; }
+  .title h1 { margin: 0; font: 400 clamp(26px, 5vw, 44px)/1 var(--head); font-style: italic; text-transform: lowercase; letter-spacing: .5px; color: #fff;
+    text-shadow: 0 0 10px rgba(62, 242, 208, .55), 0 0 2px #fff, 3px 3px 0 #04102e; }
+  .title h1 em { font-style: italic; color: var(--aqua); }
+  .title p { margin: 4px 0 0 4px; font: 400 clamp(12px, 2vw, 15px)/1.1 var(--head); font-style: italic; text-transform: lowercase; color: var(--ice); letter-spacing: 1px;
+    text-shadow: 0 0 6px rgba(95, 141, 255, .6); }
+  .layout { display: grid; grid-template-columns: 250px 1fr; gap: 20px; margin-top: 12px; align-items: start; flex: 1; }
+  @media (max-width: 780px) { .layout { grid-template-columns: 1fr; } header { min-height: 76px; } #logo { width: 72px; height: 72px; } }
+
+  /* ------------------------------------------------------- menu buttons */
+  /* the game's menu button: a dark pill, an aqua crescent at the left end, white italic label */
+  nav.menu { display: flex; flex-direction: column; gap: 9px; padding-top: 6px; }
+  .mbtn, button, label.btn { font: italic 700 14px/1 var(--ui); color: #fff; cursor: pointer; border: 0; margin: 0; white-space: nowrap; }
+  .mbtn { position: relative; display: flex; align-items: center; height: 28px; padding: 0 16px 0 26px; text-decoration: none; border-radius: 14px;
+    background: linear-gradient(180deg, #2a3f9a 0%, #142468 45%, #0a1446 55%, #0e1c5a 100%);
+    box-shadow: inset 0 1px 0 rgba(185, 210, 255, .45), inset 0 -1px 0 rgba(0, 0, 0, .6), 0 0 0 1px #050a26, 0 2px 6px rgba(0, 0, 0, .5);
+    text-shadow: 1px 1px 0 #000a2a; transition: color .12s, box-shadow .12s, filter .12s; }
+  .mbtn::before { content: ""; position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%;
+    background: radial-gradient(circle at 70% 50%, transparent 0 7px, var(--aqua) 7.5px 11px, transparent 11.5px);
+    clip-path: inset(0 45% 0 0); filter: drop-shadow(0 0 3px rgba(62, 242, 208, .8)); }
+  .mbtn:hover, .mbtn:focus-visible { color: var(--cyan); outline: none; box-shadow: inset 0 1px 0 rgba(185, 210, 255, .6), inset 0 -1px 0 rgba(0, 0, 0, .6), 0 0 0 1px var(--teal), 0 0 12px rgba(62, 242, 208, .45); }
+  .mbtn.go { height: 34px; border-radius: 17px; font-size: 16px; color: var(--ink); text-shadow: 0 1px 0 rgba(255, 255, 255, .6);
+    background: linear-gradient(180deg, #d8fff6 0%, #5ff5d8 40%, #19b8a8 60%, #2fd8c0 100%); }
+  .mbtn.go::before { top: 6px; background: radial-gradient(circle at 70% 50%, transparent 0 7px, var(--ink) 7.5px 11px, transparent 11.5px); filter: none; }
+  .mbtn.go:hover, .mbtn.go:focus-visible { color: #000; filter: brightness(1.1); box-shadow: 0 0 0 1px #fff, 0 0 18px rgba(62, 242, 208, .8); }
+  .mbtn.go:disabled { filter: grayscale(.8) brightness(.6); cursor: default; }
+  .mbtn.dim { color: #9fb0e0; background: linear-gradient(180deg, #1c2760 0%, #0c1440 50%, #0a1034 100%); }
+  .mbtn.dim::before { filter: none; opacity: .45; }
+  label.btn input { display: none; }
+  .menu .sep { height: 1px; margin: 4px 6px; background: linear-gradient(90deg, transparent, var(--rim), transparent); opacity: .6; }
+  .menu .hint { color: var(--muted); font-size: 11px; padding: 0 6px; }
+  .tip, .maker { margin-top: 8px; padding: 10px 12px; font-size: 11px; color: #cfdcff; border-radius: 10px;
+    background: linear-gradient(180deg, rgba(20, 40, 120, .75), rgba(6, 12, 46, .85)); box-shadow: inset 0 1px 0 rgba(185, 210, 255, .3), 0 0 0 1px #0a1a5a; }
+  .tip b, .maker b { display: block; font: 400 15px/1.2 var(--head); font-style: italic; text-transform: lowercase; color: #fff; text-shadow: 0 0 8px rgba(62, 242, 208, .6); margin-bottom: 3px; }
+  .maker a { color: var(--cyan); text-decoration: none; } .maker a:hover { text-decoration: underline; }
+
+  /* small buttons inside panels: the game's dialog buttons */
+  button { padding: 6px 14px 6px 22px; font-size: 13px; border-radius: 13px; position: relative;
+    background: linear-gradient(180deg, #2a3f9a 0%, #142468 50%, #0e1c5a 100%); box-shadow: inset 0 1px 0 rgba(185, 210, 255, .45), 0 0 0 1px #050a26; text-shadow: 1px 1px 0 #000a2a; }
+  button:not(.mbtn)::before { content: ""; position: absolute; left: 6px; top: 50%; width: 9px; height: 9px; margin-top: -5px; border-radius: 50%;
+    box-shadow: -2px 0 0 1.5px var(--aqua); }
+  button:not(.mbtn):hover:not(:disabled) { color: var(--cyan); box-shadow: inset 0 1px 0 rgba(185, 210, 255, .6), 0 0 0 1px var(--teal), 0 0 10px rgba(62, 242, 208, .4); }
+  button.secondary { background: linear-gradient(180deg, #1c2760 0%, #0c1440 100%); color: #c0ccff; }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--aqua); outline-offset: 1px; }
+
+  /* -------------------------------------------------------------- panels */
+  /* the game's panel: deep blue, a glossy blue rim, a folder tab at the top right */
+  .panels { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  .panel { position: relative; margin-top: 14px; border-radius: 4px 18px 18px 18px;
+    background: linear-gradient(180deg, rgba(12, 26, 86, .92), rgba(5, 11, 40, .94) 160px, rgba(4, 8, 32, .95));
+    box-shadow: 0 0 0 2px #0a1a5c, 0 0 0 4px rgba(47, 98, 230, .55), inset 0 2px 0 rgba(185, 210, 255, .25), 0 0 24px rgba(31, 70, 200, .35); }
+  .panel > .ph { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px 8px; }
+  .panel > .ph::before { content: ""; position: absolute; right: 22px; top: -16px; width: min(46%, 300px); height: 18px; border-radius: 12px 12px 0 0;
+    background: linear-gradient(180deg, #2f62e6, #12298a); box-shadow: 0 0 0 2px #0a1a5c, inset 0 1px 0 rgba(185, 210, 255, .55); }
+  .panel > .ph h2 { margin: 0; font: 400 21px/1.1 var(--head); font-style: italic; text-transform: lowercase; color: #fff; letter-spacing: .3px;
+    text-shadow: 0 0 9px rgba(62, 242, 208, .55), 2px 2px 0 #020822; }
+  .panel > .ph h2::first-letter { color: var(--aqua); }
+  .panel > .pb { padding: 4px 16px 16px; }
+  .panel p { margin: 6px 0; }
+  .muted { color: var(--muted); }
+  #status { min-height: 1.3em; font-weight: bold; color: #fff; }
+  #status.err, .err { color: var(--err); }
+  progress { width: 100%; height: 12px; margin-top: 8px; appearance: none; -webkit-appearance: none; border: 0; border-radius: 6px; overflow: hidden;
+    background: #020822; box-shadow: inset 0 0 0 1px #1c3a9a; }
+  progress::-webkit-progress-bar { background: #020822; border-radius: 6px; box-shadow: inset 0 0 0 1px #1c3a9a; }
+  progress::-webkit-progress-value { border-radius: 6px; background: linear-gradient(180deg, #b6fff0, var(--aqua) 45%, var(--teal) 55%, #2fd8c0); box-shadow: 0 0 8px var(--aqua); }
+  progress::-moz-progress-bar { border-radius: 6px; background: linear-gradient(180deg, #b6fff0, var(--aqua) 45%, var(--teal) 55%, #2fd8c0); }
+  .specs { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 8px 0 0; font-size: 12px; }
+  .specs dt { color: var(--aqua); font-weight: bold; font-style: italic; } .specs dd { margin: 0; color: #d4dcff; }
+  .steps { margin: 0; padding-left: 0; list-style: none; counter-reset: s; }
+  .steps li { counter-increment: s; position: relative; padding: 7px 0 7px 42px; border-bottom: 1px solid rgba(95, 141, 255, .18); color: #d4dcff; }
+  .steps li::before { content: counter(s); position: absolute; left: 0; top: 6px; width: 30px; height: 22px; display: grid; place-items: center; border-radius: 11px;
+    font: 400 14px/1 var(--head); font-style: italic; color: var(--ink); background: linear-gradient(180deg, #d8fff6, var(--aqua) 50%, var(--teal)); }
+  .steps li b { color: #fff; }
+  .steps + .specs { margin-top: 12px; }
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 780px) { .twocol { grid-template-columns: 1fr; } }
+  h3.minor, .bar h3 { margin: 0 0 6px; font: 400 16px/1.2 var(--head); font-style: italic; text-transform: lowercase; color: #fff; text-shadow: 0 0 6px rgba(62, 242, 208, .45); }
+  h3.minor::before, .bar h3::before { content: "◖ "; color: var(--aqua); }
+  .ticks { list-style: none; margin: 0; padding: 0; }
+  .ticks li { position: relative; padding: 5px 0 5px 20px; color: #d4dcff; border-bottom: 1px solid rgba(95, 141, 255, .14); }
+  .ticks li::before { content: ""; position: absolute; left: 2px; top: 11px; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .ticks.plus li::before { background: var(--aqua); box-shadow: 0 0 6px var(--aqua); }
+  .ticks b { color: #fff; }
+  .credit-line { margin-top: 12px !important; font-size: 11px; } .credit-line a { color: var(--aqua); }
+  .callout { margin: 10px 0 0; padding: 8px 12px; border-radius: 10px; font-size: 12px; color: #dff; background: rgba(25, 184, 168, .12); box-shadow: inset 3px 0 0 var(--aqua); }
+  .callout b { color: var(--aqua); }
+
+  /* ---------------------------------------------------------- online lobby */
+  .pill { font: bold 11px/1.2 var(--ui); color: var(--muted); padding: 3px 10px; border-radius: 10px; background: #030a30; text-transform: uppercase; box-shadow: inset 0 0 0 1px #24388c; }
+  .pill.ok { color: var(--ok); box-shadow: inset 0 0 0 1px #1b6a4a; } .pill.ok::before { content: "● "; }
+  .pill.bad { color: var(--err); box-shadow: inset 0 0 0 1px #7a2a24; }
+  #online input, #online select { background: #020724; color: #fff; border: 0; border-radius: 6px; padding: 6px 8px; font: 13px var(--ui); width: 100%;
+    box-shadow: inset 0 0 0 1px #2c4aa8, inset 0 2px 4px rgba(0, 0, 0, .6); }
+  #online input:focus { box-shadow: inset 0 0 0 1px var(--aqua), 0 0 8px rgba(62, 242, 208, .4); outline: none; }
+  #online label { display: block; color: var(--muted); font: italic bold 12px/1.6 var(--ui); }
+  #online .check { display: flex; align-items: center; gap: 8px; align-self: end; padding-bottom: 6px; font: 12px var(--ui); }
+  #online .check input { width: auto; accent-color: var(--aqua); }
+  .namebox { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .namebox input { max-width: 220px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px; }
+  .bar h3 { margin: 0; }
+  .card { margin-top: 10px; padding: 12px; border-radius: 10px; background: rgba(2, 7, 36, .9); box-shadow: inset 0 0 0 1px #1c3290, inset 3px 0 0 var(--aqua); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 480px) { .grid { grid-template-columns: 1fr; } }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .msg { color: var(--err); font-weight: bold; margin: 8px 0 0; }
+  .tablewrap { overflow-x: auto; margin-top: 8px; border-radius: 8px; box-shadow: inset 0 0 0 1px #1c3290; }
+  #rooms { width: 100%; border-collapse: collapse; font-size: 12px; }
+  #rooms th { text-align: left; color: var(--aqua); font: italic bold 12px/1 var(--ui); padding: 8px; background: linear-gradient(180deg, #1c3aa8, #0e1f6a); }
+  #rooms td { padding: 7px 8px; border-top: 1px solid #0e1a5c; vertical-align: middle; }
+  #rooms tbody tr:nth-child(odd) { background: rgba(32, 60, 170, .16); }
+  #rooms tbody tr:hover { background: rgba(62, 242, 208, .08); }
+  #rooms td:last-child { text-align: right; }
+  #rooms .rname { font-weight: bold; color: #fff; }
+  #rooms .sub { color: var(--muted); font: 11px var(--ui); margin: 0; }
+  .tag { display: inline-block; font: bold 10px/1 var(--ui); text-transform: uppercase; padding: 2px 6px; margin-left: 6px; border-radius: 8px; background: #1c2c80; color: #c8d2ff; }
+  .tag.race { background: var(--aqua); color: var(--ink); }
+  .ping-good { color: var(--ok); font-weight: bold; } .ping-ok { color: var(--amber); font-weight: bold; } .ping-bad { color: var(--err); font-weight: bold; }
+  #rooms-empty { margin-top: 10px; }
+  #members { list-style: none; padding: 0; margin: 10px 0; }
+  #members li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 12px; margin-bottom: 4px; font-size: 12px; border-radius: 12px;
+    background: linear-gradient(90deg, rgba(47, 98, 230, .45), rgba(10, 20, 80, .25)); box-shadow: inset 3px 0 0 var(--rim); }
+  #members li:first-child { box-shadow: inset 3px 0 0 var(--aqua); }
+  #share { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  #share code { background: #020724; box-shadow: inset 0 0 0 1px #2c4aa8; border-radius: 6px; padding: 6px 8px; word-break: break-all; flex: 1 1 240px; color: var(--aqua); font: 11px var(--ui); }
+  .howto { font-size: 12px; color: #d0daff; }
+  .howto b { color: #fff; }
+
+  /* ----------------------------------------------------- ticker + footer */
+  .ticker { margin-top: 18px; overflow: hidden; white-space: nowrap; font: italic bold 12px/1 var(--ui); color: #cfe0ff; padding: 7px 0; border-radius: 14px;
+    background: linear-gradient(180deg, #12298a, #060f40); box-shadow: 0 0 0 1px #0a1a5c, inset 0 1px 0 rgba(185, 210, 255, .3); }
+  .ticker span { display: inline-block; padding-left: 100%; animation: tick 50s linear infinite; animation-delay: -10s; }
+  .ticker b { color: var(--aqua); }
+  @keyframes tick { to { transform: translateX(-100%); } }
+  footer { margin-top: 14px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; color: #7f90c8; font-size: 11px; padding-bottom: 6px; }
+  .credits { text-align: right; } .credits a { color: var(--aqua); text-decoration: none; } .credits a:hover { text-decoration: underline; }
+  @media (max-width: 780px) { .credits { text-align: left; } }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge { min-width: 88px; height: 31px; padding: 0 8px; display: grid; place-items: center; text-align: center; line-height: 1.1; font: bold 9px/1.1 var(--ui); text-transform: uppercase; color: #fff;
+    border-radius: 6px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), inset 0 -1px 0 rgba(0, 0, 0, .5), 0 0 0 1px #000; }
+  .badge.b1 { background: linear-gradient(180deg, #4870ff 0 50%, #1438b0 50%); } .badge.b2 { background: linear-gradient(180deg, #7ff6e0 0 50%, #19a898 50%); color: var(--ink); }
+  .badge.b3 { background: #000; color: var(--aqua); } .badge.b4 { background: linear-gradient(180deg, #d0d0d0 0 50%, #8a8a8a 50%); color: #111; }
+  .counter { display: inline-flex; gap: 2px; margin-left: 6px; vertical-align: middle; }
+  .counter i { font: bold 13px/1 ui-monospace, "Courier New", monospace; font-style: normal; background: #000; color: var(--aqua); padding: 2px 4px; border-radius: 3px; box-shadow: inset 0 0 0 1px #0a3a40; }
+
+  /* -------------------------------------------------------------- in game */
+  #screen { display: none; position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; background: #000; }
+  canvas#canvas { width: 100%; height: 100%; display: block; image-rendering: auto; }
+  #fps { position: fixed; z-index: 3; right: 10px; bottom: 8px; color: #fff9; font: 12px var(--ui); pointer-events: none; }
+  #hint { position: fixed; z-index: 3; left: 12px; bottom: 8px; color: #fff8; font: italic 12px var(--ui); pointer-events: none; }
+  #fullscreen { position: fixed; z-index: 4; right: 8px; top: 8px; width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border-radius: 10px;
+    background: rgba(0, 0, 0, .45); box-shadow: inset 0 0 0 1px #fff4; color: #fffc; opacity: .55; text-shadow: none; }
+  #fullscreen::before { display: none; }
+  #fullscreen:hover, #fullscreen:focus-visible { opacity: 1; }
+  #fullscreen[hidden] { display: none; }
+  #fullscreen svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  #fullscreen .fs-off, body.fs #fullscreen .fs-on { display: none; }
+  body.fs #fullscreen .fs-off { display: inline; }
+  body.locked #fullscreen { opacity: 0; pointer-events: none; }
+  #netbadge { position: fixed; left: 10px; top: 8px; z-index: 4; color: #fff; padding: 6px 14px 5px 26px; font: italic bold 12px/1 var(--ui); cursor: pointer; max-width: 70vw; border-radius: 14px;
+    text-shadow: 1px 1px 0 #000; background: linear-gradient(180deg, rgba(42, 63, 154, .92), rgba(10, 20, 70, .92)); box-shadow: 0 0 0 1px #050a26, inset 0 1px 0 rgba(185, 210, 255, .45); }
+  #netbadge::before { content: ""; position: absolute; left: 8px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; box-shadow: -2px 0 0 1.5px var(--aqua); }
+  #log { margin-top: 12px; max-height: 220px; overflow: auto; background: rgba(0, 0, 16, .85); border-radius: 8px; box-shadow: inset 0 0 0 1px #1c2a7a; padding: 8px;
+    font: 12px/1.4 ui-monospace, "Courier New", monospace; color: #9fb0e6; white-space: pre-wrap; word-break: break-all; }
+  #log:empty { display: none; }
+  .logtoggle { margin: 8px 0 0; font-size: 11px; } .logtoggle a { color: var(--muted); }
+  #log.overlay { position: fixed; right: 8px; top: 8px; width: min(560px, 90vw); max-height: 40vh; margin: 0; z-index: 5; }
+
+  /* start page activity (main.js setupActivity) */
+  #activity { margin: 12px 0 4px; }
+  .live { margin: 0 0 4px; color: var(--muted); font-weight: bold; font-size: 12px; }
+  .live.on { color: var(--ok); } .live.on::before { content: "● "; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  #live-names { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  .ntag { font-size: 11px; padding: 2px 8px; border-radius: 9px; background: #16246e; color: #c8d2ff; }
+  .ntag.racing { background: var(--aqua); color: var(--ink); font-weight: bold; }
+  #daily { margin: 6px 0; font-size: 12px; } #daily b { color: var(--aqua); } #daily .live { color: var(--ok); display: inline; animation: pulse 1.2s ease-in-out infinite; }
+  #notify.on { color: var(--ok); }
+  #top { margin-top: 8px; } .tabs { display: flex; gap: 4px; }
+  .tabs button { font-size: 11px; padding: 3px 10px; background: #0b1656; color: var(--muted); box-shadow: inset 0 0 0 1px #24348a; text-shadow: none; }
+  .tabs button::before { display: none; }
+  .tabs button.on { background: var(--aqua); color: var(--ink); box-shadow: none; }
+  #top-list { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; }
+  #top-list li { display: grid; grid-template-columns: 1.8em 1fr auto; gap: 6px; padding: 3px 4px; border-top: 1px solid #0e1a5c; }
+  #top-list .r { color: var(--muted); text-align: right; font-style: italic; } #top-list li:nth-child(1) .r { color: var(--aqua); } #top-list .f { color: var(--ok); }
+  #update { margin-bottom: 10px; }
+  /* loading cover over the game until it really draws, and the small badge for later stalls */
+  #loading { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; text-align: center;
+    background: radial-gradient(ellipse at 50% 45%, #10288a 0%, #050d38 55%, #01030c 100%); }
+  #loading[hidden], #loadbadge[hidden] { display: none; }
+  #loading .ltitle { font: 400 34px/1.1 var(--head); font-style: italic; text-transform: lowercase; color: #fff; text-shadow: 0 0 12px rgba(62, 242, 208, .7), 3px 3px 0 #020822; }
+  #loading-text { margin-top: 10px; color: #d0daff; font: italic 13px var(--ui); }
+  .lbar { width: 240px; height: 8px; margin: 14px auto 0; border-radius: 4px; background: #020822; box-shadow: inset 0 0 0 1px #1c3a9a; overflow: hidden; }
+  .lbar i { display: block; width: 70px; height: 100%; border-radius: 4px; background: linear-gradient(90deg, transparent, var(--aqua), transparent); animation: lmove 1.3s ease-in-out infinite; }
+  @keyframes lmove { from { transform: translateX(-70px); } to { transform: translateX(240px); } }
+  #loadbadge { position: fixed; right: 12px; bottom: 12px; z-index: 20; font: italic bold 12px/1 var(--ui); color: var(--ink); background: var(--aqua); padding: 6px 12px; border-radius: 12px; }
+  @media (prefers-reduced-motion: reduce) { .lbar i, .live.on::before, #daily .live, .ticker span { animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="bg" aria-hidden="true"><canvas id="bgc"></canvas><div class="scan"></div></div>
+
+<main id="setup-wrap">
+  <header>
+    <canvas id="logo" width="208" height="208" aria-hidden="true"></canvas>
+    <div class="title">
+      <h1>need for speed <em>high stakes</em></h1>
+      <p>web runtime · race online</p>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="menu" aria-label="Game">
+      <button id="start" class="mbtn go" hidden>Start Game</button>
+      <label class="btn mbtn" id="pick-label" hidden>Choose NFS4 Folder…<input type="file" id="pick" webkitdirectory multiple></label>
+      <a class="mbtn" href="#online">Online Play…</a>
+      <a class="mbtn" href="#guide">How to Race…</a>
+      <a class="mbtn" href="#work">What We Built…</a>
+      <a class="mbtn" href="#about">Read Me…</a>
+      <div class="sep"></div>
+      <button id="forget" class="mbtn dim" hidden>Remove Game Files</button>
+      <div class="hint">Pick your NFS4 folder once (with the <a href="https://veg.by/files/nfs4/" target="_blank" rel="noopener">Modern Patch beta</a>). It is copied into this browser's private storage and never uploaded.</div>
+      <div class="tip"><b>tip of the day</b><span id="tip">High Stakes race: the loser hands over the pink slip.</span></div>
+      <div class="maker"><b>created by</b>
+        <a href="https://github.com/mrz944" target="_blank" rel="noopener">Marcin Zadka</a><br>
+        Built on the <a href="https://github.com/mrz944/nfs3-web" target="_blank" rel="noopener">NFS3 Web</a> runtime</div>
+    </nav>
+
+    <div class="panels" id="setup">
+      <div id="update" class="card" hidden>A newer version of the game is on the server. <button id="update-reload" class="small">Reload to update</button></div>
+      <section class="panel">
+        <div class="ph"><h2>status</h2></div>
+        <div class="pb">
+          <p id="status"></p>
+          <progress id="progress" max="1" value="0" hidden></progress>
+          <div id="log" hidden></div>
+          <p class="logtoggle"><a href="#" id="log-toggle">Show technical log</a></p>
+        </div>
+      </section>
+
+      <section class="panel" id="online">
+        <div class="ph"><h2>online play</h2><span id="server-state" class="pill">connecting…</span></div>
+        <div class="pb">
+          <div class="namebox">
+            <label for="pname">Your name</label>
+            <input id="pname" maxlength="10" autocomplete="nickname" placeholder="Player1234" title="Up to 10 letters, digits and . _ - !. Used in the lobby and in the game.">
+            <span class="muted">Racers online:<span class="counter" id="online-count"><i>0</i><i>0</i><i>0</i></span></span>
+          </div>
+          <p id="lobby-msg" class="msg" hidden></p>
+
+          <div id="activity">
+            <p id="live-line" class="live">…</p>
+            <div id="live-names"></div>
+            <p id="daily" hidden></p>
+            <button id="notify" class="small secondary" hidden>🔔 Notify me when people race</button>
+            <div id="top" hidden>
+              <div class="bar"><h3>most active racers</h3>
+                <div id="top-tabs" class="tabs"><button data-w="24h">24h</button><button data-w="7d" class="on">7 days</button><button data-w="all">All</button></div></div>
+              <ol id="top-list"></ol>
+            </div>
+          </div>
+
+          <section id="lobby">
+            <div class="bar">
+              <h3>rooms</h3>
+              <button id="show-create" class="small">Create Room</button>
+            </div>
+            <form id="create-form" class="card" hidden autocomplete="off">
+              <div class="grid">
+                <label>Room name <input id="c-name" maxlength="32" placeholder="My room"></label>
+                <label>Password <input id="c-pass" type="password" maxlength="64" placeholder="none"></label>
+                <label>Players <select id="c-max"><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option selected>8</option></select></label>
+                <label class="check"><input id="c-listed" type="checkbox" checked> Show in the room list</label>
+              </div>
+              <div class="actions"><button type="submit" class="small">Create</button><button type="button" id="c-cancel" class="small secondary">Cancel</button></div>
+            </form>
+            <form id="pass-form" class="card" hidden autocomplete="off">
+              <label><span id="pass-label">Password</span> <input id="j-pass" type="password" maxlength="64"></label>
+              <div class="actions"><button type="submit" class="small">Join</button><button type="button" id="j-cancel" class="small secondary">Cancel</button></div>
+            </form>
+            <div class="tablewrap">
+              <table id="rooms">
+                <thead><tr><th>Room</th><th>Players</th><th title="Estimated round trip through the server; a direct connection is usually faster">Ping</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p id="rooms-empty" class="muted">No open rooms yet. Create one and invite your friends.</p>
+          </section>
+
+          <section id="inroom" hidden>
+            <div class="bar">
+              <h3 id="room-title"></h3>
+              <button id="leave-room" class="small secondary">Leave Room</button>
+            </div>
+            <ul id="members"></ul>
+            <p id="best-host" class="muted"></p>
+            <div id="share"><code id="share-link"></code><button id="copy-link" class="small secondary">Copy invite link</button></div>
+            <p class="howto">Everyone clicks <b>Start Game</b>. In the game: <b>Connect Players → Network (IPX)</b>. One player
+              (ideally the best host) picks <b>Create Game</b> and chooses <b>Positional Updates</b>; the others click
+              <b>Refresh Game List</b>, pick the game under <b>Games Available</b> and click <b>Join Game</b>.</p>
+          </section>
+        </div>
+      </section>
+
+      <section class="panel" id="guide">
+        <div class="ph"><h2>how to race online</h2></div>
+        <div class="pb">
+          <ol class="steps">
+            <li><b>Get the game into this browser.</b> Install <i>NFS: High Stakes</i> (or <i>Road Challenge</i>) with the
+              <a href="https://veg.by/files/nfs4/" target="_blank" rel="noopener">Modern Patch beta</a>, click <i>Choose NFS4 Folder…</i> and pick that folder.
+              It is copied into this browser once; next time it is already here.</li>
+            <li><b>Pick a name.</b> Type it under <i>Online Play → Your name</i>. It's what the others see in the room, and the game's own name dialog offers it too.</li>
+            <li><b>Make a room.</b> One player clicks <i>Create Room</i>, gives it a name, and optionally a password and a player limit (2–8).
+              Untick <i>Show in the room list</i> for a private room.</li>
+            <li><b>Bring your friends in.</b> Click <i>Copy invite link</i> and send it, or let them pick the room in the <i>Rooms</i> list and click <i>Join</i>.
+              Everyone in the room is listed with their ping and <i>direct</i> or <i>via server</i>.</li>
+            <li><b>Everyone clicks Start Game.</b> Wait until all players see the game's menu.</li>
+            <li><b>Host the race.</b> The player shown as <i>Best host</i> goes to <b>Connect Players → Network (IPX) → Create Game</b>,
+              names the game, and in <b>Host Game</b> picks <b>Positional Updates</b>. For two players <b>Peer-to-Peer</b>, for more <b>Client/Server</b>.</li>
+            <li><b>Join the race.</b> The others go to <b>Connect Players → Network (IPX)</b>, click <b>Refresh Game List</b>, pick the game under
+              <b>Games Available</b> and click <b>Join Game</b>.</li>
+            <li><b>Race.</b> Everyone clicks <b>Ready to Race</b> in the multiplayer lobby, then the host picks the track and clicks <b>Start Race</b>.
+              Single Race, Hot Pursuit (one of you can drive the cop car) and High Stakes all work online.</li>
+          </ol>
+          <p class="callout"><b>Positional or Controller updates?</b> NFS4 offers two netcodes. With <b>Positional Updates</b> every machine drives its own car
+            and sends where it is, so your car reacts instantly whoever hosts. <b>Controller Updates</b> is the NFS3-style lockstep: the host's car reacts
+            instantly and everyone else waits one round trip to the host. Over the internet, Positional is the better choice.</p>
+          <dl class="specs">
+            <dt>Via server</dt><dd>If two browsers can't connect directly (strict routers), packets go through this server instead. It works, just a little slower.</dd>
+            <dt>Keep it visible</dt><dd>Leave every game window open while racing. A minimised tab can fall behind.</dd>
+            <dt>Names</dt><dd>Your lobby name is written into the game before it starts; it shows in the game's name dialog and in the race.</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel" id="work">
+        <div class="ph"><h2>original game · our work</h2></div>
+        <div class="pb">
+          <div class="twocol">
+            <div>
+              <h3 class="minor">untouched: the real nfs4</h3>
+              <ul class="ticks">
+                <li><b>Handling, physics and damage:</b> every car drives exactly like on a 1999 PC. The original code runs, recompiled, not rewritten or re-tuned.</li>
+                <li><b>Cars, tracks, AI and police:</b> the original game data, opponents and Hot Pursuit, including driving the cop car.</li>
+                <li><b>Music and sound:</b> the original soundtrack and effects through the game's own sound engine.</li>
+                <li><b>Menus and modes:</b> Career, Single Race, Hot Pursuit, High Stakes, Knockout, Tournament and the car Showcase.</li>
+              </ul>
+            </div>
+            <div>
+              <h3 class="minor">added: what makes it run here</h3>
+              <ul class="ticks plus">
+                <li><b>Static recompilation:</b> the game's x86 code, MMX included, is translated to C and WebAssembly, so it runs natively in the browser with no PC emulator.</li>
+                <li><b>Voodoo2 on your GPU:</b> the 3dfx Glide graphics path is redrawn with WebGL 2, keeping the Voodoo fog, depth and blending.</li>
+                <li><b>Single-core scheduling:</b> NFS4 expects one CPU core, so its threads take turns just like on a 1999 PC. That fixes the streamer and deadlock bugs it has on modern machines.</li>
+                <li><b>Internet multiplayer:</b> the game's LAN (IPX) mode now works over the internet. Rooms with passwords, a room browser,
+                  direct browser-to-browser links, lost packets recovered in one tick, and a best-host pick.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="muted credit-line">Built on the <a href="https://veg.by/en/projects/nfs4/" target="_blank" rel="noopener">NFS4 Modern Patch</a>
+            by VEG (based on 4.50: memory limit, hardware detection and start-up fixes). Your game folder needs this patch.</p>
+        </div>
+      </section>
+
+      <section class="panel" id="about">
+        <div class="ph"><h2>read me</h2></div>
+        <div class="pb">
+          <p>This page runs <b>Need for Speed: High Stakes</b> (PC, version 4.50 with the modern patch; <i>Road Challenge</i> in Europe) straight in your browser:
+            the original game code is recompiled to WebAssembly, and the Voodoo2 graphics go through WebGL.
+            You bring your own copy: pick your game folder once and it is kept in this browser's private storage. Nothing is uploaded.</p>
+          <dl class="specs">
+            <dt>Browser</dt><dd>Chrome, Edge, Firefox or Safari with WebGL&nbsp;2</dd>
+            <dt>Controls</dt><dd>Keyboard like the original; click the picture to capture the mouse, Esc releases it</dd>
+            <dt>Online</dt><dd>Up to 8 racers per room, direct browser-to-browser links with relay fallback</dd>
+            <dt>You need</dt><dd>NFS: High Stakes for PC with the <a href="https://veg.by/files/nfs4/" target="_blank" rel="noopener">Modern Patch beta</a> (data and savedata from the CD, the patch on top)</dd>
+            <dt>Storage</dt><dd>About 530&nbsp;MB for the game files, in this browser only</dd>
+          </dl>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="ticker" aria-hidden="true"><span>
+    <b>NEWS</b> &nbsp;·&nbsp; Online rooms are open: create one, share the link, race &nbsp;·&nbsp;
+    <b>TIP</b> &nbsp;·&nbsp; Host with Positional Updates and nobody feels the host's ping &nbsp;·&nbsp;
+    <b>TIP</b> &nbsp;·&nbsp; In Hot Pursuit one of you can be the cop: roadblocks and spike strips included &nbsp;·&nbsp;
+    <b>NEWS</b> &nbsp;·&nbsp; Voodoo2 graphics run on your GPU through WebGL 2 &nbsp;·&nbsp;
+  </span></div>
+
+  <footer>
+    <div class="badges" aria-hidden="true">
+      <div class="badge b1">WebGL 2.0<br>Accelerated</div>
+      <div class="badge b2">Best viewed<br>1024×768</div>
+      <div class="badge b3">WASM<br>inside</div>
+      <div class="badge b4">Open page<br>and race</div>
+    </div>
+    <div class="credits">
+      <div>Fan-made runtime · not affiliated with Electronic Arts</div>
+    </div>
+  </footer>
+</main>
+
+<div id="screen"><canvas id="canvas" width="640" height="480"></canvas></div>
+<div id="fps" hidden></div>
+<div id="netbadge" hidden title="Click to copy the room link"></div>
+<button id="fullscreen" type="button" hidden title="Fullscreen (Alt+Enter)" aria-label="Fullscreen"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path class="fs-on" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /><path class="fs-off" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" /></svg></button>
+<div id="hint" hidden>Click to capture the mouse · Esc releases it · Alt+Enter fullscreen</div>
+<div id="loading" hidden><div><div class="ltitle">high stakes</div><div id="loading-text">Loading the game…</div><div class="lbar"><i></i></div></div></div>
+<div id="loadbadge" hidden>Loading…</div>
+<script>
+// Backdrop and emblem (see the comment at the top), drawn here so the page ships no game art.
+(() => {
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- backdrop: a dark blue room with a soft glow, slow light streaks and a perspective grid floor
+  const bg = document.getElementById('bgc'), bx = bg.getContext('2d');
+  let W = 0, H = 0;
+  function size() {
+    const s = Math.min(1, 1280 / Math.max(1, innerWidth));                   // the glow is soft: half resolution is plenty
+    W = Math.round(innerWidth * s * .5); H = Math.round(innerHeight * s * .5);
+    bg.width = W; bg.height = H;
+  }
+  function drawBg(t) {
+    const g = bx.createRadialGradient(W * .7, H * .38, 0, W * .7, H * .38, Math.max(W, H) * .8);
+    g.addColorStop(0, '#13308e'); g.addColorStop(.35, '#0a1a5a'); g.addColorStop(.75, '#040a26'); g.addColorStop(1, '#02050f');
+    bx.fillStyle = g; bx.fillRect(0, 0, W, H);
+    const hy = H * .62;                                                       // horizon
+    bx.save(); bx.globalAlpha = .35; bx.strokeStyle = '#2f62e6'; bx.lineWidth = 1;
+    for (let i = -14; i <= 14; i++) { bx.beginPath(); bx.moveTo(W * .5 + i * W * .02, hy); bx.lineTo(W * .5 + i * W * .2, H); bx.stroke(); }
+    const off = reduce ? 0 : (t * .00006) % 1;
+    for (let k = 0; k < 12; k++) { const f = ((k + off) / 12) ** 2.2, y = hy + (H - hy) * f; bx.globalAlpha = .1 + .35 * f; bx.beginPath(); bx.moveTo(0, y); bx.lineTo(W, y); bx.stroke(); }
+    bx.restore();
+    const fade = bx.createLinearGradient(0, hy - 30, 0, hy + 40);                // the floor fades into the haze at the horizon
+    fade.addColorStop(0, 'rgba(4,10,38,0)'); fade.addColorStop(.5, 'rgba(4,10,38,.9)'); fade.addColorStop(1, 'rgba(4,10,38,0)');
+    bx.fillStyle = fade; bx.fillRect(0, hy - 30, W, 70);
+    bx.save(); bx.globalCompositeOperation = 'lighter';                         // diagonal light streaks, like the front end's motion blur
+    for (let i = 0; i < 7; i++) {
+      const p = ((reduce ? i * .14 : t * .00003 + i * .143) % 1), x = W * (1.2 - p * 1.6), y = H * (.1 + i * .07);
+      const sg = bx.createLinearGradient(x, y, x + W * .35, y - H * .18);
+      sg.addColorStop(0, 'rgba(62,242,208,0)'); sg.addColorStop(.5, `rgba(${i % 2 ? '95,141,255' : '62,242,208'},.12)`); sg.addColorStop(1, 'rgba(62,242,208,0)');
+      bx.strokeStyle = sg; bx.lineWidth = 2 + (i % 3); bx.beginPath(); bx.moveTo(x, y); bx.lineTo(x + W * .35, y - H * .18); bx.stroke();
+    }
+    bx.restore();
+  }
+  let last = 0;
+  function frame(t) {
+    if (!document.hidden && !document.getElementById('bg').hidden && t - last >= 50) { last = t; drawBg(t); }
+    if (!reduce) requestAnimationFrame(frame);
+  }
+  size(); drawBg(0); requestAnimationFrame(frame);
+  addEventListener('resize', () => { size(); drawBg(performance.now()); });
+
+  // ---- emblem: a poker chip (high stakes) whose rim is a rev counter, the needle in the red
+  const lg = document.getElementById('logo'), lx = lg.getContext('2d');
+  function drawLogo() {
+    const S = lg.width, c = S / 2, R = S * .46;
+    lx.clearRect(0, 0, S, S);
+    lx.save(); lx.translate(c, c);
+    lx.shadowColor = 'rgba(62,242,208,.6)'; lx.shadowBlur = S * .06;
+    let g = lx.createRadialGradient(-R * .3, -R * .35, R * .1, 0, 0, R);
+    g.addColorStop(0, '#5f8dff'); g.addColorStop(.55, '#1c3fb0'); g.addColorStop(1, '#071450');
+    lx.beginPath(); lx.arc(0, 0, R, 0, 7); lx.fillStyle = g; lx.fill(); lx.shadowBlur = 0;
+    for (let i = 0; i < 8; i++) {                                              // chip edge inserts
+      lx.save(); lx.rotate(i * Math.PI / 4 + Math.PI / 8);
+      lx.fillStyle = i % 2 ? '#e6eeff' : '#3ef2d0'; lx.fillRect(-R * .09, -R * .98, R * .18, R * .2); lx.restore();
+    }
+    lx.beginPath(); lx.arc(0, 0, R * .74, 0, 7); lx.fillStyle = '#050b24'; lx.fill();
+    lx.lineWidth = S * .012; lx.strokeStyle = '#5f8dff'; lx.stroke();
+    const a0 = Math.PI * .75, a1 = Math.PI * 2.25;                             // rev counter: 270° sweep
+    for (let i = 0; i <= 20; i++) {
+      const a = a0 + (a1 - a0) * i / 20, big = i % 4 === 0, r0 = R * (big ? .54 : .6);
+      lx.strokeStyle = i >= 16 ? '#ff4a3d' : big ? '#ffffff' : '#8ea4d8'; lx.lineWidth = big ? S * .014 : S * .008;
+      lx.beginPath(); lx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0); lx.lineTo(Math.cos(a) * R * .68, Math.sin(a) * R * .68); lx.stroke();
+    }
+    lx.beginPath(); lx.arc(0, 0, R * .64, a0 + (a1 - a0) * .8, a1); lx.strokeStyle = 'rgba(255,74,61,.7)'; lx.lineWidth = S * .02; lx.stroke();
+    const an = a0 + (a1 - a0) * .86;                                           // the needle, deep in the red
+    lx.save(); lx.rotate(an); lx.shadowColor = '#3ef2d0'; lx.shadowBlur = S * .03;
+    lx.beginPath(); lx.moveTo(-R * .1, -S * .012); lx.lineTo(R * .62, 0); lx.lineTo(-R * .1, S * .012); lx.closePath(); lx.fillStyle = '#3ef2d0'; lx.fill(); lx.restore();
+    lx.beginPath(); lx.arc(0, 0, R * .09, 0, 7); lx.fillStyle = '#e6eeff'; lx.fill();
+    lx.font = `italic ${Math.round(S * .13)}px "Russo One", "Arial Black", sans-serif`; lx.textAlign = 'center'; lx.textBaseline = 'middle';
+    lx.fillStyle = '#ffffff'; lx.shadowColor = 'rgba(62,242,208,.8)'; lx.shadowBlur = S * .03; lx.fillText('4', 0, R * .36);
+    g = lx.createLinearGradient(0, -R, 0, R * .2);                             // gloss
+    g.addColorStop(0, 'rgba(255,255,255,.28)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    lx.shadowBlur = 0; lx.beginPath(); lx.ellipse(0, -R * .42, R * .78, R * .5, 0, Math.PI, 0); lx.fillStyle = g; lx.fill();
+    lx.restore();
+  }
+  drawLogo();
+  document.fonts.load('20px "Russo One"').then(drawLogo, () => {});
+})();
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

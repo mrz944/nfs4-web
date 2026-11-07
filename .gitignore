@@ -1,0 +1,24 @@
+# Never commit EA code or data, or anything derived from them
+.venv/
+gen/
+build/
+*.wasm
+game/
+*.exe
+*.dll
+*.viv
+*.qfs
+*.frd
+web/dist/
+deps/
+__pycache__/
+*.pyc
+web/game-source.json
+# downloads (game ISO, patch archives) and disc images
+dl/
+*.iso
+*.img
+*.ccd
+*.sub
+*.7z
+*.ppm
