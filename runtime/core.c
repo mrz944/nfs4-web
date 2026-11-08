@@ -6,8 +6,27 @@
 #include <time.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <strings.h>
+#include <errno.h>
+#include <math.h>
 
 uint8_t *G;
+double rt_tick_ms;
+void rt_tick_round(struct timespec *dl) {
+    if (rt_tick_ms <= 0) return;
+    double t = (double)dl->tv_sec * 1e3 + dl->tv_nsec / 1e6, tick = rt_tick_ms;
+    t = ceil(t / tick) * tick;
+    dl->tv_sec = (time_t)(t / 1e3); dl->tv_nsec = (long)((t - (double)dl->tv_sec * 1e3) * 1e6);
+    if (dl->tv_nsec >= 1000000000) { dl->tv_sec++; dl->tv_nsec -= 1000000000; }
+}
+void rt_usleep(unsigned us) {
+    if (rt_tick_ms <= 0) { usleep(us); return; }
+    struct timespec dl; clock_gettime(CLOCK_MONOTONIC, &dl);
+    dl.tv_sec += us / 1000000; dl.tv_nsec += (long)(us % 1000000) * 1000;
+    if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+    rt_tick_round(&dl);
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL) == EINTR) {}
+}
 int rt_verbose = 1;
 __thread CPU *tls_cpu;
 __thread const char *tls_thunk_name;
@@ -18,7 +37,9 @@ typedef struct { uint32_t tid; CPU *const volatile *cpu; const char *const volat
 static Watch watch[64]; static int nwatch;
 uint32_t rt_caller(void) { return tls_ret; }   /* guest address of the current API call */
 void guest_backtrace(CPU *c);
+static __thread uint32_t tls_tid;
 void rt_watch_thread(uint32_t tid) {
+    tls_tid = tid;
     int i = __atomic_fetch_add(&nwatch, 1, __ATOMIC_SEQ_CST);
     if (i < 64) watch[i] = (Watch){ tid, (CPU *const volatile *)&tls_cpu, (const char *const volatile *)&tls_thunk_name, &tls_last, &tls_calls, &tls_ret, 0 };
 }
@@ -132,33 +153,77 @@ static pthread_mutex_t thunk_mu = PTHREAD_MUTEX_INITIALIZER;
  * On Windows the modern patch pins it to one core (SingleProcAffinity=1). Here
  * the same: one guest thread runs at a time. A thread hands over at API calls
  * that can block, and at any API call once it has run for a time slice while
- * others are waiting; the hand-over is FIFO (ticket lock). RT_MULTICORE=1: off. */
+ * others are waiting. Like Windows' scheduler, the lock goes to the waiting thread
+ * with the highest priority (SetThreadPriority; FIFO among equals), and a thread
+ * hands over at once when a higher-priority one is waiting. A thread that has
+ * waited 50 ms goes first regardless (Windows boosts starved threads too).
+ * RT_MULTICORE=1: off. */
 static pthread_mutex_t bgl_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t bgl_cv = PTHREAD_COND_INITIALIZER;
-static uint64_t bgl_next, bgl_serving;
+#define BGL_MAXW 64
+static struct { int used, prio; uint64_t seq, since; } bgl_w[BGL_MAXW];
+static int bgl_nw, bgl_busy; static uint64_t bgl_seq, bgl_grants;
 static int bgl_on = -1;
 volatile int g_bgl_contended;   /* someone is waiting for the lock */
+static volatile int bgl_top_wait = -1000;   /* highest priority among the waiters */
+static volatile int bgl_owner_prio;
 static __thread int bgl_held;
 static __thread uint64_t bgl_since;
+static int bgl_prio_default;
+static __thread volatile int *bgl_prio_ptr;  /* this thread's priority (Thread.prio) */
+void bgl_set_prio_ptr(volatile int *p) { bgl_prio_ptr = p; }
+static int bgl_my_prio(void) { return bgl_prio_ptr ? *bgl_prio_ptr : bgl_prio_default; }
 static volatile long bgl_owner; static const char *volatile bgl_owner_call;
 #include <unistd.h>
 static uint64_t bgl_now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u; }
 static int bgl_enabled(void) { if (bgl_on < 0) bgl_on = !(getenv("RT_MULTICORE") && atoi(getenv("RT_MULTICORE"))); return bgl_on; }
+static void stall_add(const char *name, uint64_t us);
+static void bgl_recount(void) {     /* under bgl_mu */
+    int top = -1000;
+    for (int i = 0; i < BGL_MAXW; i++) if (bgl_w[i].used && bgl_w[i].prio > top) top = bgl_w[i].prio;
+    bgl_top_wait = top; g_bgl_contended = bgl_nw > 0;
+}
+/* under bgl_mu, by the releasing thread: the waiter that runs next. Decided once, here,
+ * and handed over directly (waiters deciding for themselves with a time-dependent
+ * rule could all decide "not me" and sleep with the lock free). */
+static int bgl_grant = -1;
+static int bgl_pick(uint64_t now) {
+    int64_t best = INT64_MIN; int bi = -1;
+    for (int i = 0; i < BGL_MAXW; i++) {
+        if (!bgl_w[i].used || i == bgl_grant) continue;
+        int64_t p = now - bgl_w[i].since > 50000 ? 1000 : bgl_w[i].prio;   /* starved: boost */
+        int64_t key = p * (1ll << 40) - (int64_t)bgl_w[i].seq;
+        if (key > best) { best = key; bi = i; }
+    }
+    return bi;
+}
 void bgl_acquire(void) {
     if (!bgl_enabled() || bgl_held) { bgl_held++; return; }
+    int prio = bgl_my_prio();
     pthread_mutex_lock(&bgl_mu);
-    uint64_t me = bgl_next++;
-    if (me != bgl_serving) g_bgl_contended = 1;
-    while (me != bgl_serving) pthread_cond_wait(&bgl_cv, &bgl_mu);
-    g_bgl_contended = bgl_next - bgl_serving > 1;
+    uint64_t w0 = 0;
+    if (!bgl_busy) bgl_busy = 1;                 /* free: nobody can be waiting */
+    else {
+        int me = 0; while (bgl_w[me].used) if (++me == BGL_MAXW) rt_fatal("single-core lock: too many threads");
+        w0 = bgl_now_us();
+        bgl_w[me].used = 1; bgl_w[me].prio = prio; bgl_w[me].seq = bgl_seq++; bgl_w[me].since = w0;
+        bgl_nw++; bgl_recount();
+        while (bgl_grant != me) pthread_cond_wait(&bgl_cv, &bgl_mu);
+        bgl_grant = -1; bgl_w[me].used = 0; bgl_nw--; bgl_recount();
+    }
+    bgl_grants++; bgl_owner_prio = prio;
     pthread_mutex_unlock(&bgl_mu);
+    if (w0) stall_add("(lock wait)", bgl_now_us() - w0);
     bgl_held = 1; bgl_since = bgl_now_us(); bgl_owner = (long)(uintptr_t)pthread_self(); bgl_owner_call = tls_last;
 }
 void bgl_release(void) {
     if (!bgl_enabled() || bgl_held > 1) { bgl_held--; return; }
     if (bgl_held <= 0) return;
     bgl_held = 0; bgl_owner = 0;
-    pthread_mutex_lock(&bgl_mu); bgl_serving++; pthread_cond_broadcast(&bgl_cv); pthread_mutex_unlock(&bgl_mu);
+    pthread_mutex_lock(&bgl_mu);
+    if (bgl_nw) { bgl_grant = bgl_pick(bgl_now_us()); pthread_cond_broadcast(&bgl_cv); }   /* stays busy: handed over */
+    else bgl_busy = 0;
+    pthread_mutex_unlock(&bgl_mu);
 }
 /* drop the lock around a blocking host call; returns the nesting depth to restore */
 int bgl_drop(void) {
@@ -168,20 +233,27 @@ int bgl_drop(void) {
     return d;
 }
 void bgl_restore(int d) { if (d > 0) { bgl_acquire(); bgl_held = d; } }
+/* hand over if a higher-priority thread waits, or after a 4 ms slice if anyone does */
+static inline int bgl_should_yield(void) {
+    if (bgl_top_wait > bgl_owner_prio) return 1;
+    return bgl_now_us() - bgl_since >= 4000;
+}
 void bgl_preempt(void) {             /* called from lifted loops while contended */
-    if (!bgl_enabled() || bgl_held != 1) return;
-    if (bgl_now_us() - bgl_since < 4000) return;
+    if (!bgl_enabled() || bgl_held != 1 || !g_bgl_contended) return;
+    if (!bgl_should_yield()) return;
+    stall_add("(handed over in a loop)", 0);
     bgl_release(); bgl_acquire();
 }
 static void bgl_maybe_yield(void) {
-    if (!bgl_enabled() || bgl_held != 1) return;
-    if (bgl_next - bgl_serving <= 1) return;                     /* nobody waiting */
-    if (bgl_now_us() - bgl_since < 4000) return;                 /* 4 ms time slice */
+    if (!bgl_enabled() || bgl_held != 1 || !g_bgl_contended) return;
+    if (!bgl_should_yield()) return;
+    stall_add("(handed over)", 0);
     bgl_release(); bgl_acquire();
 }
 static int thunk_may_block(const char *n) {
-    static const char *const pat[] = { "Wait", "Sleep", "EnterCriticalSection", "GetMessage", "ExitThread",
-        "recv", "select", "accept", "connect", "BufferSwap", "pageflip", "MessageBox", "SuspendThread", NULL };
+    static const char *const pat[] = { "Wait", "Sleep", "GetMessage", "ExitThread",
+        "recv", "select", "accept", "connect", "BufferSwap", "pageflip", "MessageBox", "SuspendThread",
+        "ReadFile", "WriteFile", "CreateFileA", NULL };   /* file I/O: slow on OPFS */
     for (int i = 0; pat[i]; i++) if (strstr(n, pat[i])) return 1;
     return 0;
 }
@@ -229,6 +301,51 @@ uint32_t lifted_base(const char *dll) {
     return 0;
 }
 
+/* ---------------------------------------------------- stall profiler
+ * Always on and cheap: time per (API, thread) and lock waits since the last
+ * frame. A frame that took > 300 ms logs where the time went (browser stalls). */
+typedef struct { const char *name; uint32_t tid; uint32_t ep; uint64_t us, n; } StallEnt;
+#define NSTALL 128
+static StallEnt stall_tab[NSTALL];
+static volatile uint32_t stall_ep = 1;
+static uint64_t stall_frame_us;
+volatile uint64_t g_io_read_bytes, g_io_reads;
+static void stall_add(const char *name, uint64_t us) {
+    uint32_t ep = stall_ep, tid = tls_tid;
+    unsigned h = ((unsigned)(uintptr_t)name >> 3) * 31u + tid;
+    for (int k = 0; k < 8; k++) {
+        StallEnt *e = &stall_tab[(h + k) % NSTALL];
+        if (e->ep != ep) { e->ep = ep; e->name = name; e->tid = tid; e->us = 0; e->n = 0; }
+        else if (e->name != name || e->tid != tid) continue;
+        e->us += us; e->n++; return;
+    }
+}
+void rt_stall_frame(void) {       /* called at every grBufferSwap */
+    uint64_t now = bgl_now_us();
+    static uint64_t rd0, rn0;
+    if (stall_frame_us && now - stall_frame_us > 300000) {
+        StallEnt top[12]; int nt = 0;
+        for (int i = 0; i < NSTALL; i++) {
+            StallEnt e = stall_tab[i];
+            if (e.ep != stall_ep || (e.us < 20000 && e.n < 50)) continue;
+            int j;
+            if (nt < 12) j = nt++;
+            else if (top[11].us >= e.us) continue;
+            else j = 11;
+            top[j] = e;
+            while (j > 0 && top[j].us > top[j - 1].us) { StallEnt x = top[j]; top[j] = top[j - 1]; top[j - 1] = x; j--; }
+        }
+        char buf[1400]; int o = 0;
+        for (int i = 0; i < nt && o < (int)sizeof buf - 120; i++)
+            o += snprintf(buf + o, sizeof buf - o, " | t%x %s %llums/%llu", top[i].tid, top[i].name,
+                          (unsigned long long)(top[i].us / 1000), (unsigned long long)top[i].n);
+        rt_log("stall: frame took %llu ms, read %llu KB in %llu reads%s", (unsigned long long)((now - stall_frame_us) / 1000),
+               (unsigned long long)((g_io_read_bytes - rd0) >> 10), (unsigned long long)(g_io_reads - rn0), buf);
+    }
+    rd0 = g_io_read_bytes; rn0 = g_io_reads;
+    stall_ep++; stall_frame_us = bgl_now_us();
+}
+
 void call_indirect(CPU *c, uint32_t t) {
     if (t >= THUNK_BASE && t < THUNK_BASE + MAX_THUNKS * THUNK_STRIDE) {
         Thunk *th = &thunks[(t - THUNK_BASE) / THUNK_STRIDE];
@@ -239,8 +356,10 @@ void call_indirect(CPU *c, uint32_t t) {
         const char *prev = tls_thunk_name; tls_thunk_name = th->name;
         uint32_t prev_ret = tls_ret; tls_ret = RD32(c->r[ESP]); tls_last = th->name; tls_calls++;
         uint32_t ret;
+        uint64_t t0 = bgl_now_us();
         if (th->blocks) { int d = bgl_drop(); ret = th->fn(c, args); bgl_restore(d); }
         else { bgl_maybe_yield(); ret = th->fn(c, args); }
+        stall_add(th->name, bgl_now_us() - t0);
         tls_thunk_name = prev; tls_ret = prev_ret;
         c->r[EAX] = ret;
         c->r[ESP] += 4 + (th->nargs > 0 ? 4 * th->nargs : 0);
@@ -285,7 +404,7 @@ void trace_enter(CPU *c, uint32_t fn) {
     }
 }
 void trace_leave(CPU *c, uint32_t fn) {
-    if (traced(fn)) rt_log("<- %08x = %#x", fn, c->r[EAX]);
+    if (traced(fn)) rt_log("<- %08x = %#x (ebx=%#x esi=%#x edi=%#x ebp=%#x esp=%#x)", fn, c->r[EAX], c->r[EBX], c->r[ESI], c->r[EDI], c->r[EBP], c->r[ESP]);
 }
 static void trace_init(void) {
     const char *t = getenv("RT_TRACE"); if (!t) return;
@@ -550,6 +669,8 @@ uint32_t load_pe_at(const char *path, uint32_t *entry_out, uint32_t want_base) {
     }
     free(buf);
     rt_log("loaded %s at %#x (%#x bytes)", path, base, size);
+    { extern void glide_patch_driver(uint32_t, uint32_t); const char *s = strrchr(path, '/');
+      if (s && !strcasecmp(s + 1, "voodoo2a.dll")) glide_patch_driver(base, size); }
     return base;
 }
 
@@ -636,6 +757,7 @@ int main(int argc, char **argv) {
 #endif
     if (!dir) { fprintf(stderr, "usage: %s <path to NFS4 folder>\n", argv[0]); return 1; }
     if (getenv("RT_VERBOSE")) rt_verbose = atoi(getenv("RT_VERBOSE"));
+    if (getenv("RT_TICK_MS")) rt_tick_ms = atof(getenv("RT_TICK_MS"));
     snprintf(g_game_dir, sizeof g_game_dir, "%s", dir);
     trace_init();
 #ifndef __EMSCRIPTEN__
@@ -650,6 +772,9 @@ int main(int argc, char **argv) {
     /* 4 GiB reservation: stray guest pointers fault instead of hitting host memory */
     G = mmap(NULL, 0x100000000ull, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (G == MAP_FAILED) rt_fatal("cannot reserve guest address space");
+    /* RT_GUARD=1: fault on guest accesses past GUEST_SIZE, like the browser build does (its wasm
+     * memory ends there); natively they would silently read zeros */
+    if (getenv("RT_GUARD") && atoi(getenv("RT_GUARD"))) mprotect(G + GUEST_SIZE, 0x100000000ull - GUEST_SIZE, PROT_NONE);
 #endif
     missing_fp = fopen("build/missing.txt", "a");
     snprintf(g_exe_path, sizeof g_exe_path, "%s/nfs4.exe", dir);
@@ -670,4 +795,4 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-void bgl_dump(void) { rt_log("single-core lock: serving %llu, next %llu, owner thread %#lx (acquired after %s)", (unsigned long long)bgl_serving, (unsigned long long)bgl_next, bgl_owner, bgl_owner_call ? bgl_owner_call : "-"); }
+void bgl_dump(void) { rt_log("single-core lock: %llu grants, %d waiting (top priority %d), owner thread %#lx priority %d (acquired after %s)", (unsigned long long)bgl_grants, bgl_nw, bgl_top_wait, bgl_owner, bgl_owner_prio, bgl_owner_call ? bgl_owner_call : "-"); }

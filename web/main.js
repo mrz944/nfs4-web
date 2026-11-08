@@ -453,7 +453,7 @@ async function startAudio(mod) {
   const ctx = a.ctx;
   await a.worklet;
   const node = new AudioWorkletNode(ctx, 'ring-player', { outputChannelCount: [2] });
-  node.port.postMessage({ buffer: mod.HEAPU8.buffer, ptr: mod._rt_web_audio() });
+  node.port.postMessage({ buffer: mod.HEAPU8.buffer, ptr: mod._rt_web_audio(), beat: mod._rt_web_heartbeat() });
   node.port.onmessage = (e) => { const { under, secs } = e.data; if (under > 0.05 * 44100 * secs) log(`audio: ${(under / 441 / secs).toFixed(0)}% silence over ${secs.toFixed(0)} s (game mixed too little)`); };
   node.connect(ctx.destination);
   log('audio context:', ctx.state);
@@ -467,6 +467,18 @@ async function startAudio(mod) {
   return ctx;
 }
 
+function screenPixels() {
+  const dpr = devicePixelRatio || 1, a = Math.round(screen.width * dpr), b = Math.round(screen.height * dpr);
+  return `${Math.max(a, b)}x${Math.min(a, b)}`;
+}
+// Exit Game in the menu: the game can't start again in this page (its threads are done),
+// so leave fullscreen and reload: the start page, with the game files already in place
+async function backToPage() {
+  gameDead = true;
+  try { document.exitPointerLock?.(); } catch {}
+  try { if (fsElement()) await (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch {}
+  location.reload();
+}
 // the game ended (crash or exit): say so over the game instead of leaving a frozen picture
 let gameDead = false;
 function gameStopped(msg) {
@@ -504,8 +516,12 @@ async function start() {
     monitorRunDependencies: (n) => log('[emscripten] pending dependencies:', n),
     onAbort: (what) => { log('ABORT', what); track('error', { kind: 'abort', msg: String(what) }); gameStopped('The game stopped: ' + what); },
     onGameMessage: (t) => { log('ERROR game message:', t); track('error', { kind: 'message', msg: t }); },
-    onGameExit: (code) => { log('ERROR game exited, code', code); track('error', { kind: 'exit', msg: 'code ' + code }); gameStopped('The game closed itself (see the log). Reload the page to start again.'); },
-    arguments: ['/opfs/nfs4'],
+    onGameExit: (code) => {
+      if (code === 0) { log('game quit: back to the start page'); backToPage(); return; }
+      log('ERROR game exited, code', code); track('error', { kind: 'exit', msg: 'code ' + code }); gameStopped('The game closed itself (see the log). Reload the page to start again.');
+    },
+    // the screen in pixels, landscape: the game offers the resolutions that fit (glide.c)
+    arguments: ['/opfs/nfs4', `RT_SCREEN=${screenPixels()}`],
     print: (t) => console.log(t),
     printErr: (t) => console.log(t),
   });

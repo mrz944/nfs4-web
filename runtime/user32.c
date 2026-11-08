@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
+#include <stdint.h>
 
 /* --------------------------------------------------------------- input */
 /* Host (SDL window natively, the browser on web) writes key state here. */
@@ -249,11 +251,38 @@ static int timer_started;
 
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 
+/* The game runs a chain of 1 ms one-shot timers. A browser on Windows can't sleep that
+ * short (a timed wait ends on the next 15.6 ms system tick), which made the game run at
+ * 25-30 fps there. The audio worklet runs every 128 samples (2.9 ms) on a real-time thread
+ * and bumps this word each time (Atomics.notify): the ticker below waits on it and wakes
+ * the timer thread when a timer is due. Without audio the timed wait alone still works. */
+static uint32_t heartbeat;
+#ifdef __EMSCRIPTEN__
+#include <emscripten/threading.h>
+EMSCRIPTEN_KEEPALIVE uint32_t *rt_web_heartbeat(void) { return &heartbeat; }
+#endif
+static void *ticker_main(void *arg) {
+    unsigned us = (unsigned)(uintptr_t)arg; (void)us;
+    for (;;) {
+#ifdef __EMSCRIPTEN__
+        emscripten_futex_wait(&heartbeat, __atomic_load_n(&heartbeat, __ATOMIC_ACQUIRE), INFINITY);
+#else
+        usleep(us);                          /* RT_HEARTBEAT_US: stands in for the worklet (testing) */
+#endif
+        pthread_mutex_lock(&timer_mu);
+        uint64_t now = mono_ns();
+        for (int i = 0; i < MAX_TIMERS; i++) if (timers[i].used && timers[i].due <= now) { pthread_cond_signal(&timer_cv); break; }
+        pthread_mutex_unlock(&timer_mu);
+    }
+    return NULL;
+}
 static void *timer_main(void *unused) {
     (void)unused;
     CPU *tc = cpu_new_thread(0x40000);
     tls_cpu = tc;
     rt_watch_thread(0xfff0);                 /* shows as the multimedia timer thread */
+    static volatile int timer_prio = 15;     /* Windows runs timer callbacks time-critical */
+    bgl_set_prio_ptr(&timer_prio);
     pthread_mutex_lock(&timer_mu);
     for (;;) {
         int k = -1;
@@ -263,6 +292,7 @@ static void *timer_main(void *unused) {
         if (timers[k].due > now) {
             struct timespec dl; uint64_t d = timers[k].due;
             dl.tv_sec = (time_t)(d / 1000000000ull); dl.tv_nsec = (long)(d % 1000000000ull);
+            rt_tick_round(&dl);
             pthread_cond_timedwait(&timer_cv, &timer_mu, &dl);
             continue;
         }
@@ -283,6 +313,13 @@ static uint32_t w_timeSetEvent(CPU *c, const uint32_t *a) {
         pthread_cond_init(&timer_cv, &at);
         pthread_create(&timer_thread, NULL, timer_main, NULL);
         timer_started = 1;
+        unsigned hb = 0;
+#ifdef __EMSCRIPTEN__
+        hb = 1;
+#else
+        if (getenv("RT_HEARTBEAT_US")) hb = (unsigned)atoi(getenv("RT_HEARTBEAT_US"));
+#endif
+        if (hb) { pthread_t t; pthread_create(&t, NULL, ticker_main, (void *)(uintptr_t)hb); }
     }
     int k = -1;
     for (int i = 0; i < MAX_TIMERS; i++) if (!timers[i].used) { k = i; break; }

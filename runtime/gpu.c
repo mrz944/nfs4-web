@@ -105,6 +105,7 @@ void gpu_publish(GFrame *f) {
     if (pending && now_s() - renderer_seen < 0.5) {
         struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
         dl.tv_nsec += 25 * 1000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+        rt_tick_round(&dl);
         double w0 = now_s();
         while (pending && pthread_cond_timedwait(&fq_cv, &fq_mu, &dl) == 0) {}
         st_wait_ms += (now_s() - w0) * 1000;
@@ -128,6 +129,12 @@ void gpu_publish(GFrame *f) {
         frame_append(pending, f); old = f; pending->seq = f->seq;
     } else { if (pending) st_replaced++; old = pending; pending = f; }
     st_published++;
+    static int fps_log = -1; if (fps_log < 0) fps_log = getenv("RT_FPS_LOG") != NULL;
+    if (fps_log) {                              /* testing: frames published per second */
+        static double t0; static uint64_t n0; double t = now_s();
+        if (!t0) { t0 = t; n0 = st_published; }
+        if (t - t0 >= 1.0) { rt_log("fps %.0f", (st_published - n0) / (t - t0)); t0 = t; n0 = st_published; }
+    }
     last_gl_frame = now_s();
     pthread_mutex_unlock(&fq_mu);
     gpu_frame_free(old);

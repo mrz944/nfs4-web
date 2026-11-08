@@ -27,13 +27,62 @@ extern char g_exe_path[1024];
 /* ------------------------------------------------------------ paths */
 static char cwd_guest[260] = "C:\\NFS4";
 
+/* Case-insensitive name lookup with a cache of directory listings. In the browser
+ * every readdir of an OPFS folder costs tens of ms (NFS4 probes ~180 missing
+ * showcase files while building its menus: seconds of stalls). Listings are
+ * re-read after anything that changes the file system (fs_changed). */
+typedef struct DirC { struct DirC *next; char *dir; char **names; int n, valid; } DirC;
+static DirC *dir_cache[256];
+static pthread_mutex_t dir_mu = PTHREAD_MUTEX_INITIALIZER;
+static int dir_cache_off(void) { static int off = -1; if (off < 0) off = getenv("RT_NO_DIRCACHE") != NULL; return off; }
+static DirC **dir_slot(const char *dir, size_t len) {
+    unsigned h = 5381; for (size_t i = 0; i < len; i++) h = h * 33 + (unsigned char)dir[i];
+    DirC **pp = &dir_cache[h & 255];
+    while (*pp && (strlen((*pp)->dir) != len || memcmp((*pp)->dir, dir, len))) pp = &(*pp)->next;
+    return pp;
+}
+/* a host path was created, removed or renamed: re-read its folder (and itself, if a folder) */
+void fs_changed(const char *hp) {
+    const char *sl = strrchr(hp, '/');
+    pthread_mutex_lock(&dir_mu);
+    DirC *c = *dir_slot(hp, strlen(hp)); if (c) c->valid = 0;
+    if (sl && (c = *dir_slot(hp, (size_t)(sl - hp)))) c->valid = 0;
+    pthread_mutex_unlock(&dir_mu);
+}
+
 static int ci_find(const char *dir, const char *name, char *out, size_t n) {
-    DIR *d = opendir(dir);
-    if (!d) return 0;
-    struct dirent *e; int ok = 0;
-    while ((e = readdir(d)))
-        if (!strcasecmp(e->d_name, name)) { snprintf(out, n, "%s", e->d_name); ok = 1; break; }
-    closedir(d);
+    if (dir_cache_off()) {
+        DIR *d = opendir(dir);
+        if (!d) return 0;
+        struct dirent *e; int ok = 0;
+        while ((e = readdir(d)))
+            if (!strcasecmp(e->d_name, name)) { snprintf(out, n, "%s", e->d_name); ok = 1; break; }
+        closedir(d);
+        return ok;
+    }
+    pthread_mutex_lock(&dir_mu);
+    DirC **pp = dir_slot(dir, strlen(dir)), *c = *pp;
+    if (!c) { c = *pp = calloc(1, sizeof *c); c->dir = strdup(dir); }
+    if (!c->valid) {
+        for (int i = 0; i < c->n; i++) free(c->names[i]);
+        free(c->names); c->names = NULL; c->n = 0;
+        DIR *d = opendir(dir);
+        if (d) {
+            int cap = 0; struct dirent *e;
+            while ((e = readdir(d))) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                if (c->n == cap) { cap = cap ? cap * 2 : 32; c->names = realloc(c->names, cap * sizeof *c->names); }
+                c->names[c->n++] = strdup(e->d_name);
+            }
+            closedir(d);
+        }
+        if (rt_verbose > 1) rt_log("dircache: listed %s (%d entries)", dir, c->n);
+        c->valid = 1;
+    }
+    int ok = 0;
+    for (int i = 0; i < c->n; i++)
+        if (!strcasecmp(c->names[i], name)) { snprintf(out, n, "%s", c->names[i]); ok = 1; break; }
+    pthread_mutex_unlock(&dir_mu);
     return ok;
 }
 
@@ -57,16 +106,18 @@ int fs_map(const char *gp, char *out, size_t outsz) {
         char *next = strtok_r(NULL, "/", &save);
         char real[256];
         if (!strcmp(tok, ".")) { tok = next; continue; }
-        if (!missing && ci_find(cur, tok, real, sizeof real)) {
+        if (!strcmp(tok, "..")) {
+            size_t l = strlen(cur); snprintf(cur + l, sizeof cur - l, "/..");
+        } else if (!missing && ci_find(cur, tok, real, sizeof real)) {
             size_t l = strlen(cur); snprintf(cur + l, sizeof cur - l, "/%s", real);
         } else {
-            if (next) missing = 1;
+            missing = 1;
             size_t l = strlen(cur); snprintf(cur + l, sizeof cur - l, "/%s", tok);
         }
         tok = next;
     }
     snprintf(out, outsz, "%s", cur);
-    return !missing;
+    return !missing;   /* 1: every component exists (case-insensitively) */
 }
 
 /* ------------------------------------------------------------ files */
@@ -81,7 +132,7 @@ static int is_nul_device(const char *p) {
 static uint32_t k_CreateFileA(CPU *c, const uint32_t *a) {
     const char *gp = HSTR(A(0)); uint32_t access = A(1), disp = A(4);
     if (!gp || !*gp) { rt_log("CreateFileA(\"\") rejected (empty path)"); tls_lasterr = 3; return INVALID_HANDLE; }
-    char hp[1024]; fs_map(gp, hp, sizeof hp);
+    char hp[1024]; int found = fs_map(gp, hp, sizeof hp);
     if (is_nul_device(gp)) {   /* Windows' NUL device (any dir, any extension, "nul:"): reads EOF, writes vanish */
         snprintf(hp, sizeof hp, "/dev/null");
         disp = 3;   /* OPEN_EXISTING */
@@ -98,7 +149,12 @@ static uint32_t k_CreateFileA(CPU *c, const uint32_t *a) {
     case 4: fl |= O_CREAT; break;            /* OPEN_ALWAYS */
     case 5: fl |= O_TRUNC; break;            /* TRUNCATE_EXISTING */
     }
+    if (!found && !(fl & O_CREAT) && !is_nul_device(gp)) {   /* known missing: no host round trip */
+        if (rt_verbose) rt_log("CreateFileA(%s) -> not found (%s)", gp, hp);
+        tls_lasterr = ERROR_FILE_NOT_FOUND; return INVALID_HANDLE;
+    }
     int fd = open(hp, fl, 0644);
+    if (fd >= 0 && !found && (fl & O_CREAT)) fs_changed(hp);
     if (fd < 0 && is_nul_device(gp)) fd = open("/tmp/rt-nul", O_RDWR | O_CREAT | O_TRUNC, 0644);  /* no /dev/null */
     if (fd < 0) {
         if (rt_verbose) rt_log("CreateFileA(%s) -> not found (%s)", gp, hp);
@@ -128,6 +184,7 @@ static uint32_t k_ReadFile(CPU *c, const uint32_t *a) {
         if (RD32(ov + 16)) set_event(RD32(ov + 16), 1, 0);
     } else n = read(f->fd, G + A(1), A(2));
     if (A(3)) WR32(A(3), n < 0 ? 0 : (uint32_t)n);
+    { extern volatile uint64_t g_io_read_bytes, g_io_reads; if (n > 0) g_io_read_bytes += (uint64_t)n; g_io_reads++; }
     if (rt_verbose >= 3) rt_log("ReadFile(h=%#x %s @%ld, %u bytes -> %#x, ov=%#x) = %zd", A(0), f->path, (long)pos, A(2), A(1), A(4), n);
     return n >= 0;
 }
@@ -168,24 +225,24 @@ static uint32_t k_GetOverlappedResult(CPU *c, const uint32_t *a) {
 }
 static uint32_t k_FlushFileBuffers(CPU *c, const uint32_t *a) { (void)c; (void)a; return 1; }
 static uint32_t k_GetFileAttributesA(CPU *c, const uint32_t *a) {
-    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp);
+    char hp[1024];
     struct stat st;
-    if (stat(hp, &st)) { tls_lasterr = ERROR_FILE_NOT_FOUND; return INVALID_HANDLE; }
+    if (!fs_map(HSTR(A(0)), hp, sizeof hp) || stat(hp, &st)) { tls_lasterr = ERROR_FILE_NOT_FOUND; return INVALID_HANDLE; }
     return S_ISDIR(st.st_mode) ? 0x10 : 0x80;
 }
 static uint32_t k_SetFileAttributesA(CPU *c, const uint32_t *a) { (void)c; (void)a; return 1; }
 static uint32_t k_DeleteFileA(CPU *c, const uint32_t *a) {
-    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp); return unlink(hp) == 0;
+    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp); int r = unlink(hp) == 0; fs_changed(hp); return r;
 }
 static uint32_t k_MoveFileA(CPU *c, const uint32_t *a) {
     char h1[1024], h2[1024]; fs_map(HSTR(A(0)), h1, sizeof h1); fs_map(HSTR(A(1)), h2, sizeof h2);
-    return rename(h1, h2) == 0;
+    int r = rename(h1, h2) == 0; fs_changed(h1); fs_changed(h2); return r;
 }
 static uint32_t k_CreateDirectoryA(CPU *c, const uint32_t *a) {
-    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp); return mkdir(hp, 0755) == 0;
+    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp); int r = mkdir(hp, 0755) == 0; fs_changed(hp); return r;
 }
 static uint32_t k_RemoveDirectoryA(CPU *c, const uint32_t *a) {
-    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp); return rmdir(hp) == 0;
+    char hp[1024]; fs_map(HSTR(A(0)), hp, sizeof hp); int r = rmdir(hp) == 0; fs_changed(hp); return r;
 }
 static uint32_t k_GetCurrentDirectoryA(CPU *c, const uint32_t *a) {
     uint32_t n = (uint32_t)strlen(cwd_guest);
@@ -301,6 +358,12 @@ void ev_dump(void) {
     rt_log("last %u events:", n - k);
     for (; k < n; k++) { EvRec *r = &evring[k & 0x3fff]; rt_log("  %10.3f th=%lx %s %#x (%u) from %#x", r->t / 1e9, (unsigned long)r->th, r->what, r->h, r->x, r->from); }
 }
+/* WaitForMultipleObjects sleeps on this until any object changes (a signal wakes it at
+ * once: a short timed poll would cost a whole 15.6 ms timer tick in a browser on Windows) */
+static pthread_mutex_t any_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t any_cv = PTHREAD_COND_INITIALIZER;
+static uint32_t any_gen;
+static void any_changed(void) { pthread_mutex_lock(&any_mu); any_gen++; pthread_cond_broadcast(&any_cv); pthread_mutex_unlock(&any_mu); }
 static Waitable *waitable_new(void) {
     Waitable *w = calloc(1, sizeof *w);
     pthread_mutex_init(&w->mu, NULL); pthread_cond_init(&w->cv, NULL);
@@ -328,6 +391,7 @@ static int wait_one_gen(Waitable *w, uint32_t ms, uint32_t gen0) {
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     dl.tv_sec += ms / 1000; dl.tv_nsec += (long)(ms % 1000) * 1000000;
     if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+    rt_tick_round(&dl);
     pthread_mutex_lock(&w->mu);
     int ok = 1;
     for (;;) {
@@ -353,11 +417,17 @@ static uint32_t k_WaitForSingleObject(CPU *c, const uint32_t *a) {
 }
 static uint32_t k_WaitForMultipleObjectsEx(CPU *c, const uint32_t *a) {
     uint32_t n = A(0), arr = A(1), all = A(2), ms = A(3);
-    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
     if (ms == INFINITE) ev(all ? "waitall" : "wait", RD32(arr), n);
     uint32_t gens[64];
     for (uint32_t i = 0; i < n && i < 64; i++) { Waitable *w = get_waitable(RD32(arr + 4 * i)); gens[i] = w ? w->pulse_gen : 0; }
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+    if (ms != INFINITE) {
+        dl.tv_sec += ms / 1000; dl.tv_nsec += (long)(ms % 1000) * 1000000;
+        if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+        rt_tick_round(&dl);
+    }
     for (;;) {
+        pthread_mutex_lock(&any_mu); uint32_t gen = any_gen; pthread_mutex_unlock(&any_mu);
         if (!all) {
             for (uint32_t i = 0; i < n; i++) {
                 Waitable *w = get_waitable(RD32(arr + 4 * i));
@@ -380,10 +450,12 @@ static uint32_t k_WaitForMultipleObjectsEx(CPU *c, const uint32_t *a) {
                 return WAIT_OBJECT_0;
             }
         }
-        struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-        uint64_t el = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-        if (ms != INFINITE && el >= ms) return WAIT_TIMEOUT;
-        usleep(1000);
+        if (ms == 0) return WAIT_TIMEOUT;
+        pthread_mutex_lock(&any_mu);
+        int r = 0;
+        while (any_gen == gen && r != ETIMEDOUT) r = ms == INFINITE ? pthread_cond_wait(&any_cv, &any_mu) : pthread_cond_timedwait(&any_cv, &any_mu, &dl);
+        pthread_mutex_unlock(&any_mu);
+        if (r == ETIMEDOUT) return WAIT_TIMEOUT;
     }
 }
 static uint32_t k_CreateEventA(CPU *c, const uint32_t *a) {
@@ -400,6 +472,7 @@ static uint32_t set_event(uint32_t h, int sig, int pulse) {
     if (pulse) { w->signaled = 0; w->pulse_gen++; }
     pthread_cond_broadcast(&w->cv);
     pthread_mutex_unlock(&w->mu);
+    if (sig) any_changed();
     return 1;
 }
 static uint32_t k_SetEvent(CPU *c, const uint32_t *a) { return set_event(A(0), 1, 0); }
@@ -412,28 +485,42 @@ static uint32_t k_CreateMutexA(CPU *c, const uint32_t *a) {
     return handle_new(H_MUTEX, w);
 }
 
-/* critical sections: key host mutexes by guest address */
-#define MAX_CS 512
-static struct { uint32_t addr; pthread_mutex_t mu; } cs_tab[MAX_CS];
+/* critical sections: host mutexes keyed by guest address (open-addressing hash; slots
+ * are never freed, so lookups need no lock once the address is in) */
+#define MAX_CS 1024
+static struct { volatile uint32_t addr; pthread_mutex_t mu; } cs_tab[MAX_CS];
 static pthread_mutex_t cs_tab_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t *cs_get(uint32_t addr) {
-    pthread_mutex_lock(&cs_tab_mu);
-    int free_i = -1;
-    for (int i = 0; i < MAX_CS; i++) {
-        if (cs_tab[i].addr == addr) { pthread_mutex_unlock(&cs_tab_mu); return &cs_tab[i].mu; }
-        if (!cs_tab[i].addr && free_i < 0) free_i = i;
+    uint32_t h = (addr * 2654435761u) >> 22;            /* 10 bits */
+    for (uint32_t k = 0; k < MAX_CS; k++) {
+        uint32_t i = (h + k) & (MAX_CS - 1), v = __atomic_load_n(&cs_tab[i].addr, __ATOMIC_ACQUIRE);
+        if (v == addr) return &cs_tab[i].mu;
+        if (!v) break;
     }
-    if (free_i < 0) rt_fatal("too many critical sections");
-    pthread_mutexattr_t at; pthread_mutexattr_init(&at);
-    pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&cs_tab[free_i].mu, &at);
-    cs_tab[free_i].addr = addr;
-    pthread_mutex_unlock(&cs_tab_mu);
-    return &cs_tab[free_i].mu;
+    pthread_mutex_lock(&cs_tab_mu);
+    for (uint32_t k = 0; k < MAX_CS; k++) {
+        uint32_t i = (h + k) & (MAX_CS - 1);
+        if (cs_tab[i].addr == addr) { pthread_mutex_unlock(&cs_tab_mu); return &cs_tab[i].mu; }
+        if (!cs_tab[i].addr) {
+            pthread_mutexattr_t at; pthread_mutexattr_init(&at);
+            pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+            pthread_mutex_init(&cs_tab[i].mu, &at);
+            __atomic_store_n(&cs_tab[i].addr, addr, __ATOMIC_RELEASE);
+            pthread_mutex_unlock(&cs_tab_mu);
+            return &cs_tab[i].mu;
+        }
+    }
+    rt_fatal("too many critical sections");
 }
 static uint32_t k_InitializeCriticalSection(CPU *c, const uint32_t *a) { cs_get(A(0)); return 0; }
 static uint32_t k_DeleteCriticalSection(CPU *c, const uint32_t *a) { (void)a; return 0; }
-static uint32_t k_EnterCriticalSection(CPU *c, const uint32_t *a) { pthread_mutex_lock(cs_get(A(0))); return 0; }
+/* single-core mode: an uncontended Enter must not hand the CPU to another thread
+ * (NFS4's loader enters ~1000 times per menu screen); only a real wait drops the lock */
+static uint32_t k_EnterCriticalSection(CPU *c, const uint32_t *a) {
+    pthread_mutex_t *m = cs_get(A(0));
+    if (pthread_mutex_trylock(m)) { int d = bgl_drop(); pthread_mutex_lock(m); bgl_restore(d); }
+    return 0;
+}
 static uint32_t k_LeaveCriticalSection(CPU *c, const uint32_t *a) { pthread_mutex_unlock(cs_get(A(0))); return 0; }
 
 /* ------------------------------------------------------------- threads */
@@ -442,7 +529,7 @@ typedef struct {
     uint32_t start, param, stack;
     pthread_t th; uint32_t tid;
     pthread_mutex_t smu; pthread_cond_t scv; int suspended;
-    int prio;
+    volatile int prio;
 } Thread;
 static uint32_t next_tid = 0x100;
 
@@ -454,10 +541,12 @@ static void *thread_main(void *p) {
     CPU *c = cpu_new_thread(t->stack ? t->stack : 0x100000);
     tls_cpu = c;
     rt_watch_thread(t->tid);
+    bgl_set_prio_ptr(&t->prio);
     ev("thread start", t->tid, t->param);
     uint32_t r = guest_call(c, t->start, 1, t->param);
     rt_log("thread %#x exited (%u)", t->tid, r);
     pthread_mutex_lock(&t->w.mu); t->w.signaled = 1; pthread_cond_broadcast(&t->w.cv); pthread_mutex_unlock(&t->w.mu);
+    any_changed();
     return NULL;
 }
 static uint32_t k_CreateThread(CPU *c, const uint32_t *a) {
@@ -483,13 +572,15 @@ static uint32_t k_GetThreadPriority(CPU *c, const uint32_t *a) {
     Thread *t = handle_get(A(0), H_THREAD); return t ? (uint32_t)t->prio : 0;
 }
 static uint32_t k_SetThreadPriority(CPU *c, const uint32_t *a) {
-    Thread *t = handle_get(A(0), H_THREAD); if (t) t->prio = (int)A(1); return 1;
+    Thread *t = handle_get(A(0), H_THREAD); if (t) t->prio = (int)A(1);
+    if (rt_verbose) rt_log("SetThreadPriority(thread %#x, %d)", t ? t->tid : A(0), (int)A(1));
+    return 1;
 }
 static uint32_t k_GetCurrentThread(CPU *c, const uint32_t *a) { return 0xFFFFFFFEu; }
 static uint32_t k_GetCurrentThreadId(CPU *c, const uint32_t *a) { return (uint32_t)(c->fs_base >> 12); }
 static uint32_t k_GetCurrentProcess(CPU *c, const uint32_t *a) { return 0xFFFFFFFFu; }
 static uint32_t k_GetCurrentProcessId(CPU *c, const uint32_t *a) { return 0x42; }
-static uint32_t k_SleepEx(CPU *c, const uint32_t *a) { usleep(A(0) ? A(0) * 1000 : 0); if (!A(0)) sched_yield(); return 0; }
+static uint32_t k_SleepEx(CPU *c, const uint32_t *a) { rt_usleep(A(0) ? A(0) * 1000 : 0); if (!A(0)) sched_yield(); return 0; }
 static uint32_t k_ExitProcess(CPU *c, const uint32_t *a) {
     fprintf(stderr, "[rt] ExitProcess(%u)\n", A(0));
 #ifdef __EMSCRIPTEN__

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <string.h>
 
 /* ---- guest address space layout ----
  * Compact so the same layout fits a wasm32 heap allocation in the browser:
@@ -25,6 +26,12 @@
 
 /* ---- logging ---- */
 extern int rt_verbose;
+/* timed waits and sleeps; RT_TICK_MS=15.625 makes them wake only on such ticks, like a
+ * browser on Windows does (testing) */
+struct timespec;
+extern double rt_tick_ms;
+void rt_tick_round(struct timespec *deadline);
+void rt_usleep(unsigned us);
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 _Noreturn void rt_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -71,6 +78,7 @@ extern char g_game_dir[1024];
 /* map a guest path ("C:\\x\\gamedata\\A.VIV", "fedata/x") to a host path;
  * case-insensitive per component. returns 0 if parent dir missing. */
 int fs_map(const char *gpath, char *out, size_t outsz);
+void fs_changed(const char *hostpath);   /* path created/removed: re-list its folder */
 
 /* ---- per-DLL import tables ---- */
 extern const ImportDef imp_kernel32[], imp_user32[], imp_gdi32[], imp_advapi32[],
@@ -103,3 +111,4 @@ void bgl_acquire(void);
 void bgl_release(void);
 int  bgl_drop(void);          /* around a host-side wait: returns depth for bgl_restore */
 void bgl_restore(int depth);
+void bgl_set_prio_ptr(volatile int *prio);   /* this thread's Windows priority, read at each lock request */

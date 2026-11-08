@@ -18,7 +18,7 @@ carries over unchanged.
 |---|---|
 | **Lifter** | NFS4 uses instructions NFS3 didn't: MMX (movie decoder, blitters), `cmov`, `fcomi`, `ffree`, `fsincos`, `enter`. |
 | **Win32** | ~50 more imports (`runtime/win32_extra.c`): drives and CD probing, child processes, version info, mixer and CD audio, `WritePrivateProfileString`, and the MSVC CRT start-up of the patched `voodoo2a.dll`. `LoadLibrary("DDRAW.DLL")` etc. now hand out the runtime's own system DLLs. |
-| **Single-core mode** | NFS4 is not safe on a multi-core CPU. That's why the modern patch has `SingleProcAffinity=1`. Its file streamer, for example, checks a chunk before locking it (abort: *"STREAM_release - chunk has already been released"*), and busy-waits for its reader thread without calling the OS. The runtime emulates one core: only one guest thread runs at a time, with FIFO hand-over at blocking API calls and a 4 ms time slice. The lifter puts a preemption check (one flag test) on every loop back-edge so that busy-waits hand over too. `RT_MULTICORE=1` turns it off. |
+| **Single-core mode** | NFS4 is not safe on a multi-core CPU. That's why the modern patch has `SingleProcAffinity=1`. Its file streamer, for example, checks a chunk before locking it (abort: *"STREAM_release - chunk has already been released"*), and busy-waits for its reader thread without calling the OS. The runtime emulates one core: only one guest thread runs at a time. It is handed over at blocking API calls, by thread priority as on Windows, with a 4 ms time slice among equals. The lifter puts a preemption check (one flag test) on every loop back-edge so that busy-waits hand over too. `RT_MULTICORE=1` turns it off. |
 | **Online** | NFS4's IPX mode runs on the same virtual LAN. NFS4 adds a choice that NFS3 didn't have: **Positional Updates** vs **Controller Updates** (see below). |
 | **Page** | Restyled after NFS4's own front end. The lobby name is written into `data/TEXT/TEXT.ENG` (default name) and `savedata/config.dat` (offset `0xF2C`). |
 
@@ -38,12 +38,28 @@ When hosting, NFS4 asks:
 - **Positional Updates**: each machine drives its own car and sends its position. Your own
   car reacts instantly whoever hosts, which makes it the better choice over the internet.
 
-Race traffic is 32 packets/s each way, as in NFS3.
+Race traffic: Controller Updates send 32 small packets/s each way, as in NFS3. Positional Updates
+send about 8 position packets/s (~240 bytes) and each game simulates its own car. Tested natively with
+`RT_NET_DELAY=75` on both sides (150 ms round trip): a two-player race runs with matching clocks and no drops.
 
 **Verified natively** (`tools/nettest.sh`, two headless instances through the relay): the game
 list shows the host's game, the client joins, both show up in the multiplayer lobby with live
 delay bars, and a two-player race on Celtic Ruins runs on both with synchronised clocks and
 shared AI, with 0 drops.
+
+## Graphics modes
+
+NFS4 lists only exact 4:3 modes (`nfs4.exe` 0x51a4a5 checks `w * 3 == h * 4`) and renders in 4:3, so
+real 16:9 would need a field-of-view rework of the game. Instead the driver's 16 mode records
+(rewritten when `voodoo2a.dll` loads, `glide_patch_driver`) carry sharp 4:3 modes up to
+**2880x2160**; the page pillarboxes them. With a Voodoo driver the game fixes its video memory
+budget at 8 MB (only modes up to 1600x1200 fit); the runtime raises it to the renderer's 32 MB.
+The page passes the screen size (`RT_SCREEN`), so only modes that fit the screen are offered.
+Pick one in **Options → Graphics → Screen Size**: the menus stay 640x480, races use the chosen
+mode. Tested natively: a race at 1792x1344 runs at the game's 64 fps cap.
+
+Also from NFS3 Web: full frame rate on Windows (timers woken from the audio thread instead of
+1 ms sleeps that Windows browsers round up to 15.6 ms), and Exit Game returns to the start page.
 
 ## Status
 
@@ -84,6 +100,9 @@ The page patches `nfs4.ini` in each browser: `ThrashDriver=glide3x`, `NoMovies=1
 | `RT_CURSOR_ADDR=689510` | scripted `CLICK@x;y` move from the game's real cursor (NFS4 moves it to the focused button itself) |
 | `RT_INPUT=…,MEMDUMP` | dump the exe's data/bss to `build/mem_<t>.bin` (reverse-engineering aid) |
 | `RT_MULTICORE=1` | turn off single-core mode |
+| `RT_NO_DIRCACHE=1` | turn off the folder-listing cache |
+| `RT_GUARD=1` | fault on guest accesses past 512 MB, like the browser (natively they silently read zeros) |
+| `RT_NET_DELAY=ms` · `RT_FPS_LOG=1` · `RT_TICK_MS=15.6` | simulated latency · fps log · Windows-like coarse timers |
 
 Everything from NFS3 Web still applies (`RT_HEADLESS`, `RT_DUMP`, `RT_TRACE`, `RT_NET*`, `RT_PROF`, `./re`).
 

@@ -54,13 +54,40 @@ Two bugs show up with truly parallel threads:
 
 The runtime emulates one core:
 
-- a FIFO ticket lock (`bgl_*`) that a guest thread holds while it runs guest code;
-- thunks whose names can block (`Wait*`, `Sleep*`, `EnterCriticalSection`, `GetMessage`,
-  `recv*`, `select`, `ExitThread`, `grBufferSwap`, …) drop it around the call;
-- any other API call hands over after a 4 ms slice if someone is waiting;
+- a lock (`bgl_*`) that a guest thread holds while it runs guest code. Like Windows' scheduler,
+  it goes to the waiting thread with the highest `SetThreadPriority` (FIFO among equals). A
+  thread that has waited 50 ms goes first, as Windows boosts starved threads;
+- thunks whose names can block (`Wait*`, `Sleep*`, `GetMessage`, `recv*`, `select`,
+  `ExitThread`, `grBufferSwap`, …) drop it around the call. `EnterCriticalSection` drops it
+  only when the section is actually taken;
+- any other API call, and any loop back-edge, hands over at once if a higher-priority thread
+  waits, otherwise after a 4 ms slice if anyone does;
 - `guest_call` acquires it, which covers host threads entering guest code (new threads, timer callbacks);
 - every lifted loop back-edge does `if (g_bgl_contended) bgl_preempt();`. That's one flag read
   in the common case, and it's what lets busy-waits yield.
+
+File I/O (`ReadFile`, `WriteFile`, `CreateFileA`) also drops the lock, as a disk wait would on Windows.
+
+The thread priorities NFS4 sets: the 128 Hz service thread that runs its timer "interrupt"
+(audio, streaming) is time-critical (15), the game clock thread 2, the menu loader 1, and the
+game thread normal (0). Loading is paced by that service: one ~8 KB read per 7.8 ms tick.
+Before this scheduling, the loader and timer threads each waited a full 4 ms slice behind the
+game thread at every critical section, which stretched a menu screen change to 2–3 s.
+
+The front end also has deliberate waits that draw nothing: the title screen waits 3 s for a key
+(`0x4c2788`: 384 ticks), and a loop like it runs before a race.
+
+**Stall log.** A frame that takes over 300 ms logs where the time went, per API and thread
+(`stall: frame took … | t118 KERNEL32.DLL!EnterCriticalSection 2665ms/940 | …`). This is always on and
+also shows in the browser's client logs.
+
+## File lookups (runtime/kernel32.c)
+
+Guest paths are matched case-insensitively per component. In the browser a `readdir` of an
+OPFS folder costs ~30 ms, and the front end probes ~180 showcase files that don't exist
+(`Data\Showcase\Art\HPP91.qfs`, …), which stalled menus for seconds. Folder listings are
+cached and re-read only after the runtime itself creates, deletes or renames something in that
+folder (`fs_changed`). Opening a file known to be missing makes no host call. `RT_NO_DIRCACHE=1` turns the cache off.
 
 ## Online (IPX)
 

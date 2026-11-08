@@ -107,7 +107,7 @@ static uint32_t x_WritePrivateProfileStringA(CPU *c, const uint32_t *a) {
         o += (size_t)sprintf(out + o, "%s=%s\r\n", key, val);
     }
     f = fopen(hp, "wb");
-    if (f) { fwrite(out, 1, o, f); fclose(f); }
+    if (f) { fwrite(out, 1, o, f); fclose(f); fs_changed(hp); }
     free(src); free(out);
     rt_log("ini write [%s] %s = %s", sec, key ? key : "(section deleted)", val ? val : "(deleted)");
     return f != NULL;
@@ -218,6 +218,8 @@ static uint32_t x_CompareStringW(CPU *c, const uint32_t *a) {
     }
     return n1 < n2 ? 1 : n1 > n2 ? 3 : 2;
 }
+/* the MSVC CRT asks for SSE/SSE2 to pick memcpy/math paths: say no, keep it on plain x86 */
+static uint32_t x_IsProcessorFeaturePresent(CPU *c, const uint32_t *a) { (void)a; return 0; }
 static uint32_t x_GetWindowThreadProcessId(CPU *c, const uint32_t *a) { if (A(1)) WR32(A(1), 1); return 1; }
 
 #define X(dll, n, args) {dll, #n, args, x_##n}
@@ -246,6 +248,6 @@ const ImportDef imp_extra[] = {
     X("KERNEL32.DLL", FreeEnvironmentStringsW, 1), X("KERNEL32.DLL", GetStringTypeA, 5),
     X("KERNEL32.DLL", GetStringTypeW, 4), X("KERNEL32.DLL", LCMapStringA, 6), X("KERNEL32.DLL", LCMapStringW, 6),
     X("KERNEL32.DLL", CompareStringA, 6), X("KERNEL32.DLL", CompareStringW, 6),
-    X("USER32.DLL", GetWindowThreadProcessId, 2),
+    X("KERNEL32.DLL", IsProcessorFeaturePresent, 1), X("USER32.DLL", GetWindowThreadProcessId, 2),
     {0},
 };

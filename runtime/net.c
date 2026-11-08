@@ -76,12 +76,47 @@ static void trace_pkt(const char *dir, const uint8_t node[6], uint16_t dport, ui
 /* --------------------------------------------------------------- transport */
 static void transport_send(const uint8_t dst[6], const uint8_t *pkt, int len);
 
+static void deliver_now(const uint8_t src[6], const uint8_t *p, int len);
+/* RT_NET_DELAY=ms: hold incoming packets that long (testing a link's latency natively) */
+#define DQ 1024
+static struct { double due; uint8_t src[6]; uint16_t len; uint8_t p[MAXPKT + 4]; } dq[DQ];
+static unsigned dq_h, dq_t; static double net_delay = -1;
+static pthread_mutex_t dq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t dq_cv = PTHREAD_COND_INITIALIZER;
+static void *delay_main(void *unused) {
+    (void)unused;
+    pthread_mutex_lock(&dq_mu);
+    for (;;) {
+        while (dq_h == dq_t) pthread_cond_wait(&dq_cv, &dq_mu);
+        double w = dq[dq_t].due - tnow();
+        if (w > 0) { pthread_mutex_unlock(&dq_mu); usleep((useconds_t)(w * 1e6)); pthread_mutex_lock(&dq_mu); continue; }
+        uint8_t src[6], p[MAXPKT + 4]; int len = dq[dq_t].len;
+        memcpy(src, dq[dq_t].src, 6); memcpy(p, dq[dq_t].p, (size_t)len); dq_t = (dq_t + 1) % DQ;
+        pthread_mutex_unlock(&dq_mu); deliver_now(src, p, len); pthread_mutex_lock(&dq_mu);
+    }
+    return NULL;
+}
 /* a packet from the network (any thread) */
 void net_deliver(const uint8_t src[6], const uint8_t *p, int len) {
     if (len < 4) return;
     static double loss = -1;            /* RT_NET_LOSS=percent: drop incoming packets (testing) */
     if (loss < 0) { const char *e = getenv("RT_NET_LOSS"); loss = e ? atof(e) / 100.0 : 0; }
     if (loss > 0 && (double)rand() / RAND_MAX < loss) { stats.drop++; return; }
+    if (net_delay < 0) {
+        const char *e = getenv("RT_NET_DELAY"); net_delay = e ? atof(e) / 1000.0 : 0;
+        if (net_delay > 0) { pthread_t t; pthread_create(&t, NULL, delay_main, NULL); }
+    }
+    if (net_delay > 0 && len <= MAXPKT + 4) {
+        pthread_mutex_lock(&dq_mu);
+        if ((dq_h + 1) % DQ != dq_t) {
+            dq[dq_h].due = tnow() + net_delay; memcpy(dq[dq_h].src, src, 6); dq[dq_h].len = (uint16_t)len; memcpy(dq[dq_h].p, p, (size_t)len);
+            dq_h = (dq_h + 1) % DQ; pthread_cond_signal(&dq_cv);
+        }
+        pthread_mutex_unlock(&dq_mu);
+        return;
+    }
+    deliver_now(src, p, len);
+}
+static void deliver_now(const uint8_t src[6], const uint8_t *p, int len) {
     uint16_t dport = (uint16_t)(p[0] << 8 | p[1]), sport = (uint16_t)(p[2] << 8 | p[3]);
     trace_pkt("in ", src, dport, sport, p + 4, len - 4);
     pthread_mutex_lock(&mu);
