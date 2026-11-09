@@ -1,13 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <radialGradient id="g" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="#5f8dff"/><stop offset=".55" stop-color="#1c3fb0"/><stop offset="1" stop-color="#071450"/></radialGradient>
+    <radialGradient id="g" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="#a8c4ff"/><stop offset=".35" stop-color="#3a66e8"/><stop offset=".75" stop-color="#1534a8"/><stop offset="1" stop-color="#081a66"/></radialGradient>
+    <linearGradient id="c" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset=".42" stop-color="#b9d2ff"/><stop offset=".5" stop-color="#1c3a98"/><stop offset=".62" stop-color="#5f8dff"/><stop offset="1" stop-color="#e6f0ff"/></linearGradient>
   </defs>
   <rect width="64" height="64" rx="14" fill="#02050f"/>
+  <circle cx="32" cy="32" r="30" fill="#010726"/>
   <circle cx="32" cy="32" r="28" fill="url(#g)"/>
-  <g fill="#3ef2d0"><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(22.5 32 32)"/><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(112.5 32 32)"/><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(202.5 32 32)"/><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(292.5 32 32)"/></g>
-  <g fill="#e6eeff"><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(67.5 32 32)"/><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(157.5 32 32)"/><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(247.5 32 32)"/><rect x="29.5" y="4.5" width="5" height="6" transform="rotate(337.5 32 32)"/></g>
-  <circle cx="32" cy="32" r="20" fill="#050b24" stroke="#5f8dff" stroke-width="1.5"/>
-  <path d="M46 40 A16 16 0 0 0 47.6 29" fill="none" stroke="#ff4a3d" stroke-width="2.5"/>
-  <path d="M30 33.6 L46.5 36 L30 30.4 Z" fill="#3ef2d0"/>
-  <circle cx="32" cy="32" r="3" fill="#e6eeff"/>
+  <g fill="#3ef2d0"><rect x="28.5" y="5" width="7" height="6" transform="rotate(22.5 32 32)"/><rect x="28.5" y="5" width="7" height="6" transform="rotate(112.5 32 32)"/><rect x="28.5" y="5" width="7" height="6" transform="rotate(202.5 32 32)"/><rect x="28.5" y="5" width="7" height="6" transform="rotate(292.5 32 32)"/></g>
+  <g fill="#e6eeff"><rect x="28.5" y="5" width="7" height="6" transform="rotate(67.5 32 32)"/><rect x="28.5" y="5" width="7" height="6" transform="rotate(157.5 32 32)"/><rect x="28.5" y="5" width="7" height="6" transform="rotate(247.5 32 32)"/><rect x="28.5" y="5" width="7" height="6" transform="rotate(337.5 32 32)"/></g>
+  <circle cx="32" cy="32" r="20" fill="#030a26" stroke="#5f8dff" stroke-width="1.5"/>
+  <path d="M43.9 44.7 A17 17 0 0 0 48.6 28.5" fill="none" stroke="#ff4a3d" stroke-width="2.5"/>
+  <path transform="translate(1 0) skewX(-12) translate(6 0)" fill="url(#c)" fill-rule="evenodd" stroke="#010726" stroke-width="1.6" stroke-linejoin="round" paint-order="stroke"
+    d="M33 17 H40 V34.5 H44 V40.5 H40 V46 H33 V40.5 H20 V35 L33 17 Z M33 26.5 L27 34.5 H33 Z"/>
 </svg>
