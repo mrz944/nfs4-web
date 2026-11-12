@@ -281,6 +281,23 @@
     .lbar i, .live.on::before, #daily .live, .ticker span, .mbtn.go:hover, .logo.shine::after { animation: none !important; }
     .mbtn, .more a { transition: none; } .mbtn:hover, .more a:hover { transform: none; }
   }
+  /* What's New (setupChangelog in main.js): a dialog over the page */
+  #changelog { --cl: var(--aqua); padding: 0; border: 0; background: transparent; color: var(--text); width: min(680px, calc(100vw - 32px)); max-width: none; max-height: none; overflow: visible; }
+  #changelog::backdrop { background: rgba(0, 2, 12, .74); }
+  #changelog > .panel { display: flex; flex-direction: column; max-height: min(82vh, 780px); max-height: min(82dvh, 780px); }
+  #changelog .ph button { padding: 4px 10px; font-size: 13px; }
+  #changelog-list { overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 6px; font: 13px/1.5 var(--ui); }
+  #changelog-list section + section { border-top: 2px dotted rgba(140, 160, 230, .25); }
+  #changelog-list h3 { margin: 12px 0 8px; font: 700 15px/1.2 var(--px); color: var(--cl); text-transform: uppercase; }
+  #changelog-list h3 i { margin-left: 8px; padding: 1px 6px; font: 400 11px/1.3 var(--px); font-style: normal; color: #000; background: var(--cl); text-transform: uppercase; vertical-align: 2px; }
+  #changelog-list ul { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 7px; }
+  #changelog-list li { display: grid; grid-template-columns: 58px 1fr; gap: 10px; align-items: baseline; }
+  #changelog-list .ck { font: 400 10px/1 var(--px); text-transform: uppercase; text-align: center; padding: 4px 0 3px; color: #000; clip-path: var(--notch); position: relative; top: -1px; }
+  #changelog-list .ck.new { background: var(--cl); } #changelog-list .ck.improved { background: #8cb8ff; } #changelog-list .ck.fixed { background: #7fdf96; }
+  #changelog .clfoot { margin: 0; padding: 8px 16px 12px; font-size: 11px; color: var(--muted); }
+  #changelog .clfoot a { color: var(--cl); }
+  .mbtn .clnew { display: none; margin-left: auto; padding: 2px 5px 1px; font: 400 10px/1 var(--px); font-style: normal; color: #000; background: var(--gold, #ffd800); letter-spacing: 0; }
+  .mbtn.fresh .clnew { display: inline-block; }
 </style>
 </head>
 <body>
@@ -301,6 +318,7 @@
       <a class="mbtn" href="#guide">How to Race…</a>
       <a class="mbtn" href="#work">What We Built…</a>
       <a class="mbtn" href="#about">Read Me…</a>
+      <a class="mbtn" id="changelog-open" href="#changelog">What's New… <i class="clnew">new</i></a>
       <div class="sep"></div>
       <button id="forget" class="mbtn dim" hidden>Remove Game Files</button>
       <div class="hint">Pick your NFS4 folder once (with the <a href="https://veg.by/files/nfs4/" target="_blank" rel="noopener">Modern Patch beta</a>). It is copied into this browser's private storage and never uploaded.</div>
@@ -309,6 +327,8 @@
         <a href="https://github.com/mrz944" target="_blank" rel="noopener">Marcin Zadka</a><br>
         Source on <a href="https://github.com/mrz944/nfs4-web" target="_blank" rel="noopener">GitHub ›</a><br>
         Built on the <a href="https://github.com/mrz944/nfs3-web" target="_blank" rel="noopener">NFS3 Web</a> runtime</div>
+      <div class="maker"><b>community</b>
+        <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">Discord ›</a> help, bug reports, ideas</div>
       <div class="more"><b>more races</b>
         <a href="https://nfs2se.xyz/" target="_blank" rel="noopener"><span>nfs2se.xyz ›</span>Need for Speed II Special Edition</a>
         <a href="https://nfs3.xyz/" target="_blank" rel="noopener"><span>nfs3.xyz ›</span>Need for Speed III: Hot Pursuit</a></div>
@@ -319,7 +339,7 @@
         recompiled game, so crashes, hangs, slow loading, graphics or sound glitches and dropped online games can
         happen. Single and online races are tested; Career, Hot Pursuit and High Stakes modes haven't been played
         through yet. If something breaks, reloading the page usually helps. Please report problems on
-        <a href="https://github.com/mrz944/nfs4-web/issues" target="_blank" rel="noopener">GitHub</a>.</div>
+        <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">Discord</a> or <a href="https://github.com/mrz944/nfs4-web/issues" target="_blank" rel="noopener">GitHub</a>.</div>
       <div id="update" class="card" hidden>A newer version of the game is on the server. <button id="update-reload" class="small">Reload to update</button></div>
       <section class="panel">
         <div class="ph"><h2>status</h2></div>
@@ -488,7 +508,7 @@
       <div class="badge b4">Open page<br>and race</div>
     </div>
     <div class="credits">
-      <div><a href="https://github.com/mrz944/nfs4-web" target="_blank" rel="noopener">source on github</a> · also in your browser:
+      <div><a href="https://github.com/mrz944/nfs4-web" target="_blank" rel="noopener">source on github</a> · <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">discord</a> · also in your browser:
         <a href="https://nfs2se.xyz/" target="_blank" rel="noopener">nfs2se.xyz</a> · <a href="https://nfs3.xyz/" target="_blank" rel="noopener">nfs3.xyz</a></div>
       <div>Fan-made runtime · not affiliated with Electronic Arts</div>
     </div>
@@ -633,6 +653,13 @@
   Promise.all(['17px "Russo One"', '8px Silkscreen'].map((f) => document.fonts.load(f))).then(drawLogo, () => {});
 })();
 </script>
+<dialog id="changelog" aria-labelledby="changelog-title">
+  <section class="panel">
+    <div class="ph"><h2 id="changelog-title">What's New</h2><button id="changelog-close" type="button" class="secondary">Close</button></div>
+    <div id="changelog-list"></div>
+    <p class="clfoot">Changes to nfs4.xyz, day by day. Follow every change in <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">#changelog on Discord</a>.</p>
+  </section>
+</dialog>
 <script type="module" src="main.js"></script>
 </body>
 </html>

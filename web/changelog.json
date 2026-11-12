@@ -1,0 +1,24 @@
+{
+  "game": "NFS4 High Stakes",
+  "about": "What changed on nfs4.xyz, day by day. Kinds: new, improved, fixed. Days run 05:00 to 05:00 Polish time. nfs3-webgl's tools/discord/changelog.mjs posts them to Discord.",
+  "days": [
+    { "date": "2026-11-12", "items": [
+      ["new", "Discord server for help, bug reports, ideas and finding races: linked in the menu and in the beta note."],
+      ["new", "What's New: this list of changes, day by day."]
+    ] },
+    { "date": "2026-11-09", "items": [
+      ["new", "A new look: a lo-fi start page with a new emblem and icons."],
+      ["new", "An early beta notice, with where to report problems."]
+    ] },
+    { "date": "2026-11-08", "items": [
+      ["improved", "Smoother menus: the game's threads take turns by priority, as on Windows 98, and file lookups are much faster."],
+      ["new", "Sharp 4:3 modes up to 2880×2160."],
+      ["improved", "Smoother online races and steadier frame pacing, from NFS3 Web."],
+      ["fixed", "A hang during start-up."]
+    ] },
+    { "date": "2026-11-07", "items": [
+      ["new", "First version: Need for Speed: High Stakes (with VEG's Modern Patch) recompiled to WebAssembly. Bring your own game folder; it never leaves your browser."],
+      ["new", "Online races in the browser over the game's LAN (IPX) mode."]
+    ] }
+  ]
+}

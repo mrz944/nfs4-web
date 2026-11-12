@@ -905,11 +905,58 @@ function setupLogToggle() {
   t.onclick = (e) => { e.preventDefault(); try { localStorage.setItem('nfs4.log', logWanted() ? '0' : '1'); } catch {} draw(); };
   draw();
 }
+// ------------------------------------------------------------------- what's new
+// The changelog (web/changelog.json: the changes, day by day, written for players; nfs3-webgl's
+// tools/discord/changelog.mjs posts the same days to Discord) in a dialog, opened from the
+// menu's What's New… or with #changelog in the address. The button says NEW until the newest
+// day has been looked at; days the visitor hasn't seen yet are marked too.
+function setupChangelog(prefix) {
+  const dlg = $('changelog'), btn = $('changelog-open'), list = $('changelog-list');
+  if (!dlg || !btn || !list) return;
+  const KIND = { new: 'New', improved: 'Better', fixed: 'Fixed' };
+  let data = null, seen = '';
+  try { seen = localStorage.getItem(prefix + 'changelogSeen') || ''; } catch {}
+  const load = () => data ? Promise.resolve(data)
+    : fetch('changelog.json?t=' + Date.now(), { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((j) => (data = j));
+  const dateText = (d) => { try { return new Date(d + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }); } catch { return d; } };
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  function draw(before) {
+    list.replaceChildren(...data.days.map((day) => {
+      const sec = el('section', before && day.date > before ? 'unseen' : '');
+      const h = el('h3', null, dateText(day.date));
+      if (before && day.date > before) h.append(el('i', null, 'new'));
+      const ul = el('ul');
+      for (const [kind, text] of day.items) { const li = el('li'); li.append(el('span', 'ck ' + kind, KIND[kind] || kind), el('span', null, text)); ul.append(li); }
+      sec.append(h, ul);
+      return sec;
+    }));
+    list.scrollTop = 0;
+  }
+  async function open() {
+    const before = seen;
+    if (!dlg.open) { try { dlg.showModal(); } catch { dlg.setAttribute('open', ''); } }
+    list.textContent = 'Loading…';
+    try { await load(); draw(before); } catch { list.textContent = 'The list of changes couldn\'t be loaded. Try again in a moment.'; return; }
+    const newest = data.days[0]?.date || '';
+    if (newest > seen) { seen = newest; try { localStorage.setItem(prefix + 'changelogSeen', seen); } catch {} }
+    btn.classList.remove('fresh');
+  }
+  btn.addEventListener('click', (e) => { e.preventDefault(); open(); });
+  $('changelog-close')?.addEventListener('click', () => dlg.close());
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });     // a click on the backdrop
+  dlg.addEventListener('close', () => { if (location.hash === '#changelog') history.replaceState(null, '', location.pathname + location.search); });
+  const fromHash = () => { if (location.hash === '#changelog') open(); };
+  window.addEventListener('hashchange', fromHash);
+  fromHash();
+  load().then((d) => { if ((d.days[0]?.date || '') > seen) btn.classList.add('fresh'); }).catch(() => {});
+}
+
 async function init() {
   setupLogToggle();
   $('tip').textContent = TIPS[Math.floor(Math.random() * TIPS.length)];
   setupOnline();
   setupActivity();
+  setupChangelog('nfs4.');
   log('page loaded; crossOriginIsolated =', crossOriginIsolated, '; SharedArrayBuffer =', typeof SharedArrayBuffer);
   if (!crossOriginIsolated) {
     status('This page must be served with cross-origin isolation (COOP/COEP headers). Use web/serve.mjs.', true);
