@@ -49,6 +49,7 @@ window.addEventListener('error', (e) => log('ERROR', e.message, e.filename ? `${
 window.addEventListener('unhandledrejection', (e) => log('ERROR (promise)', e.reason?.stack || e.reason));
 
 import { Net } from './net.js';
+import { openWritable, writeFile } from './opfs.js';
 
 const GAME_DIR = 'nfs4';
 const net = new Net();
@@ -100,7 +101,7 @@ async function packSource() {
   } catch { return null; }
 }
 async function readText(dir, name) { try { return await (await (await dir.getFileHandle(name)).getFile()).text(); } catch { return null; } }
-async function writeText(dir, name, text) { const w = await (await dir.getFileHandle(name, { create: true })).createWritable(); await w.write(text); await w.close(); }
+async function writeText(dir, name, text) { await writeFile(dir, name, text); }
 async function importPack(base) {
   status('Checking the game download…');
   const ir = await fetch(base + 'index.json');
@@ -148,7 +149,7 @@ async function importPack(base) {
         for (const [path, size] of c.files) {
           const fh = await (await subdir(path)).getFileHandle(path.split('/').at(-1), { create: true });
           const isIni = path.toLowerCase() === 'nfs4.ini', ini = [];
-          const w = await fh.createWritable();
+          const w = await openWritable(fh);
           let left = size;
           while (left > 0) {
             if (!buf.length) await pull();
@@ -156,7 +157,7 @@ async function importPack(base) {
             if (isIni) ini.push(part.slice()); else await w.write(exact(part));
             buf = buf.subarray(n); left -= n;
           }
-          if (isIni) await w.write(patchIni(new TextDecoder('latin1').decode(concat(...ini))));
+          if (isIni) await w.write(patchIni(new TextDecoder('latin1').decode(concat(...ini)), settings.movies));
           await w.close();
         }
         doneChunks.add(c.name);
@@ -265,20 +266,48 @@ async function writeGameName(name) {
   log(`name: the game will call you "${name}"`);
 }
 async function fileBytes(dir, name) { try { return new Uint8Array(await (await (await dir.getFileHandle(name)).getFile()).arrayBuffer()); } catch { return null; } }
-async function writeBytes(dir, name, bytes) { const w = await (await dir.getFileHandle(name, { create: true })).createWritable(); await w.write(exact(bytes)); await w.close(); }
+async function writeBytes(dir, name, bytes) { await writeFile(dir, name, exact(bytes)); }
 
 // The browser build renders through the Voodoo2 (Glide) driver -> WebGL2, and skips the FMVs
 // (intro, menu attract demos): the game's movie streamer races its file reader thread and on
 // multi-core machines can wait forever for the first frame (about 1 start in 4 natively, nearly
 // every start in Safari). NoMovies is the modern patch's own switch for this.
 const iniSet = (t, key, val) => (new RegExp(`^${key}\\s*=.*$`, 'mi').test(t) ? t.replace(new RegExp(`^${key}\\s*=.*$`, 'mi'), `${key}=${val}`) : t);
-const patchIni = (t) => iniSet(iniSet(iniSet(t, 'ThrashDriver', 'glide3x'), 'NoMovies', '1'), 'SingleProcAffinity', '1');
+const patchIni = (t, movies = false) => iniSet(iniSet(iniSet(t, 'ThrashDriver', 'glide3x'), 'NoMovies', movies ? '0' : '1'), 'SingleProcAffinity', '1');
+
+// --------------------------------------------------------------- settings
+// Game Settings on the start page, kept in this browser (localStorage nfs4.settings) and used
+// when the game starts: intro movies (nfs4.ini NoMovies), fullscreen, the fps counter, the
+// resolutions the game offers (RT_SCREEN, glide.c), the render scale (gpu.c), controllers,
+// volume and the touch controls (setupTouch: steering, size, side; on phones and tablets only).
+const SETTINGS_DEFAULT = { fullscreen: false, fps: false, movies: false, pads: true, screen: 'auto', quality: 'auto', volume: 100,
+  touchSteer: 'buttons', touchSize: 'auto', touchSwap: false };
+const settings = { ...SETTINGS_DEFAULT };
+try { Object.assign(settings, JSON.parse(localStorage.getItem('nfs4.settings') || '{}')); } catch {}
+const saveSettings = () => { try { localStorage.setItem('nfs4.settings', JSON.stringify(settings)); } catch {} };
+function setupSettings() {
+  document.body.classList.toggle('touchdev', touchDevice());
+  const els = [...document.querySelectorAll('[data-set]')];
+  $('set-screen-auto').textContent = `Up to this screen (${screenPixels().replace('x', '×')})`;
+  const draw = () => {
+    for (const el of els) { const v = settings[el.dataset.set]; if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v); }
+    $('set-volume-out').textContent = `${settings.volume}%`;
+    watchPads.show?.();
+  };
+  for (const el of els) el.addEventListener(el.type === 'range' ? 'input' : 'change', () => {
+    const k = el.dataset.set;
+    settings[k] = el.type === 'checkbox' ? el.checked : el.type === 'range' ? Number(el.value) : el.value;
+    saveSettings(); draw();
+  });
+  $('set-reset').addEventListener('click', () => { Object.assign(settings, SETTINGS_DEFAULT); saveSettings(); draw(); });
+  draw();
+}
 async function ensureIni() {
   try {
     const d = await gameDir();
     const fh = await d.getFileHandle('nfs4.ini');
-    const t = await (await fh.getFile()).text(), u = patchIni(t);
-    if (u !== t) { const w = await fh.createWritable(); await w.write(u); await w.close(); log('nfs4.ini: ThrashDriver=glide3x, NoMovies=1, SingleProcAffinity=1'); }
+    const t = await (await fh.getFile()).text(), u = patchIni(t, settings.movies);
+    if (u !== t) { const w = await openWritable(fh); await w.write(u); await w.close(); log(`nfs4.ini: ThrashDriver=glide3x, NoMovies=${settings.movies ? 0 : 1}, SingleProcAffinity=1`); }
   } catch (e) { log('nfs4.ini not patched:', e.message); }
 }
 
@@ -316,9 +345,9 @@ async function importFolder(files) {
     }
     const fh = await d.getFileHandle(await ciFile(d, parts.at(-1)), { create: true });
     const src = f.blob ? await f.blob() : f;
-    const w = await fh.createWritable();
+    const w = await openWritable(fh);
     if (parts.length === 1 && parts[0].toLowerCase() === 'nfs4.ini') {
-      const ini = patchIni(await src.text());
+      const ini = patchIni(await src.text(), settings.movies);
       await w.write(ini);
     } else {
       await w.write(src);
@@ -328,7 +357,7 @@ async function importFolder(files) {
     $('progress').value = done / total;
     status(`Copying game files… ${(done / 2 ** 20).toFixed(0)} / ${(total / 2 ** 20).toFixed(0)} MB`);
   }
-  const marker = await (await dir.getFileHandle('.download-complete', { create: true })).createWritable();
+  const marker = await openWritable(await dir.getFileHandle('.download-complete', { create: true }));
   await marker.write('complete'); await marker.close();
   $('progress').hidden = true;
 }
@@ -366,9 +395,38 @@ async function toggleFullscreen() {
     await (el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : el.webkitRequestFullscreen());
   } catch (e) { log('fullscreen:', e.message || e); }
 }
+// iPhone Safari lets only videos go fullscreen; the page opened from a home-screen icon (a web
+// app) has no browser bars at all, so on an iPhone the button and a card say how to do that.
+const isIPhone = () => /iPhone|iPod/.test(navigator.userAgent) || new URLSearchParams(location.search).get('iphone') === '1';
+const isWebApp = () => navigator.standalone === true || matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches;
+const wantHomeScreenTip = () => !fsSupported() && isIPhone() && !isWebApp();
+function showHomeScreenCard() {               // on the start page, until "Got it"
+  if (!wantHomeScreenTip()) return;
+  const card = $('ios-app');
+  let seen = false;
+  try { seen = localStorage.getItem('nfs4.homeScreenTip') === '1'; } catch {}
+  card.hidden = seen;
+  $('ios-app-ok').addEventListener('click', () => { card.hidden = true; try { localStorage.setItem('nfs4.homeScreenTip', '1'); } catch {} });
+}
+function setupHomeScreenTip() {               // in the game: the fullscreen button shows how
+  const b = $('fullscreen'), tip = $('fstip');
+  b.hidden = false;
+  b.title = 'Fullscreen'; b.setAttribute('aria-label', 'How to play fullscreen');
+  let timer = 0;
+  const hide = () => { tip.hidden = true; clearTimeout(timer); };
+  b.addEventListener('click', (ev) => {
+    ev.stopPropagation(); b.blur();
+    if (!tip.hidden) return hide();
+    tip.hidden = false; clearTimeout(timer); timer = setTimeout(hide, 9000);
+  });
+  tip.addEventListener('click', hide);
+}
 function setupFullscreen() {
   const b = $('fullscreen');
-  if (!fsSupported()) return;                 // iPhone Safari: only videos can go fullscreen
+  if (!fsSupported()) {                       // iPhone Safari: only videos can go fullscreen
+    if (wantHomeScreenTip()) setupHomeScreenTip();
+    return;
+  }
   b.hidden = false;
   b.addEventListener('click', (ev) => { ev.stopPropagation(); b.blur(); toggleFullscreen(); });
   const changed = () => {
@@ -442,13 +500,351 @@ function attachInput(mod, canvas) {
   canvas.addEventListener('mouseup', (ev) => { if (document.pointerLockElement === canvas) push(3, ev.button === 2 ? 3 : 1, 0); });
   canvas.addEventListener('wheel', (ev) => { push(4, ev.deltaY < 0 ? 120 : -120, 0); ev.preventDefault(); }, { passive: false });
   canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  if (touchWanted()) setupTouch(mod, canvas, push, keyIndex);
+  return (code, down) => { const idx = keyIndex[code]; if (idx !== undefined && idx >= 0) push(1, idx, down ? 1 : 0); };
 }
+
+// ------------------------------------------------------------------- touch
+// Phones and tablets: controls over the game, held down like keys. NFS4 drives from the keyboard
+// unless a controller is chosen in Options › Controllers (it doesn't switch by itself), so every
+// control is a key: the arrows steer, gas and brake (and move through the menus), Space is the
+// handbrake, OK = Enter, ESC = Esc, C changes the camera and B (held) looks behind. Steering by
+// thumb stick or by tilting the phone presses the arrow keys once they're past a third of the way.
+// A finger on the picture itself is the mouse: the cursor jumps to it, follows it, and lifting it
+// clicks. ?touch=1 shows the controls anywhere, ?touch=0 hides them.
+function touchDevice() {
+  const q = new URLSearchParams(location.search).get('touch');
+  if (q != null) return q !== '0';
+  return navigator.maxTouchPoints > 0 && matchMedia('(pointer: coarse)').matches;
+}
+const touchWanted = () => touchDevice() && settings.touchSteer !== 'off';
+const STEER_MODES = ['buttons', 'stick', 'tilt'];
+const STEER_NAME = { buttons: 'buttons', stick: 'thumb stick', tilt: 'tilt' };
+// keys: sent as keys; group: a finger slides between these
+const CTL = {
+  left: { keys: ['ArrowLeft'], group: 'steer' }, right: { keys: ['ArrowRight'], group: 'steer' },
+  gas: { keys: ['ArrowUp'], group: 'pedal' }, brake: { keys: ['ArrowDown'], group: 'pedal' }, hb: { keys: ['Space'], group: 'pedal' },
+  ok: { keys: ['Enter'] }, esc: { keys: ['Escape'] }, cam: { keys: ['KeyC'] }, look: { keys: ['KeyB'] },
+  mode: { tap: true }, center: { tap: true },
+};
+const MIN_HOLD = 90;          // ms: a quick tap still lasts a few of the game's frames
+const STICK = 64;             // px (at size 1) from where the thumb landed to full lock
+const STEER_KEY = 0.35;       // stick or tilt past this: the arrow key is down
+const TILT_FULL = 28;         // degrees of turning the phone to full lock (after a 2 degree dead zone)
+const STEER_ICON = {
+  buttons: '<path d="M10 7l-5 5 5 5M14 7l5 5-5 5"/>',
+  stick: '<circle cx="12" cy="12" r="8"/><circle class="fill" cx="12" cy="12" r="3"/>',
+  tilt: '<rect x="4" y="8" width="16" height="9" rx="2" transform="rotate(-18 12 12)"/>',
+};
+// iPhone asks once before a page may read the motion sensor, and only from a tap (Start, or the
+// steering button): a refusal that came from outside a tap is asked again next time
+let tiltAsk = null;
+function askTilt() {
+  const D = typeof DeviceOrientationEvent === 'undefined' ? null : DeviceOrientationEvent;
+  if (typeof D?.requestPermission !== 'function') return Promise.resolve(true);
+  if (!tiltAsk) tiltAsk = D.requestPermission().then((r) => r === 'granted', () => { tiltAsk = null; return false; });
+  return tiltAsk;
+}
+function setupTouch(mod, canvas, push, keyIndex) {
+  const box = $('touch');
+  document.body.classList.add('touch');
+  box.hidden = false;
+  let steer = STEER_MODES.includes(settings.touchSteer) ? settings.touchSteer : 'buttons';
+  log(`touch controls on, steering with ${STEER_NAME[steer]}`);
+
+  // size: the setting (Auto: by the screen), never more than fits beside and above each other
+  const size = () => {
+    const auto = Math.max(0.8, Math.min(1.25, Math.min(innerWidth, innerHeight) / 390));
+    const want = settings.touchSize === 'auto' ? auto : Number(settings.touchSize) || 1;
+    const fit = Math.min((innerWidth - 64) / 344, (innerHeight - 40) / 252);
+    box.style.setProperty('--ts', Math.max(0.6, Math.min(want, fit)).toFixed(3));
+  };
+  size(); addEventListener('resize', size);
+  box.toggleAttribute('data-swap', !!settings.touchSwap);
+  const toastEl = box.querySelector('.ttoast'); let toastT = 0;
+  const toast = (t, ms = 3000) => { toastEl.textContent = t; toastEl.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { toastEl.hidden = true; }, ms); };
+
+  // What is pressed is worked out again from the fingers at every event, never counted up and
+  // down: a lost touchend (iOS drops them when its long-press text selection or callout takes
+  // over a touch) can then not leave anything stuck.
+  const fingers = new Map();          // 't'+touch id or 'm'+pointer id -> { ctl, x0 (the stick: where it landed) }
+  const held = new Map();             // ctl -> when it went down (what the game has now)
+  let releaseT = 0;
+  const stickEl = box.querySelector('.tstick'), knob = stickEl.querySelector('i');
+  const stick = { x: 0 };
+  const tilt = { x: 0, phi: null, center: null, heard: false, check: 0 };
+  const unit = () => STICK * (parseFloat(box.style.getPropertyValue('--ts')) || 1);
+  const send = (c, down) => {
+    const k = CTL[c]; if (!k) return;
+    for (const code of k.keys || []) { const i = keyIndex[code]; if (i >= 0) push(1, i, down ? 1 : 0); }
+    for (const b of box.querySelectorAll(`[data-ctl="${c}"]`)) b.classList.toggle('on', down);
+    if (!down) return;
+    try { navigator.vibrate?.(8); } catch {}
+    if (c === 'mode') queueMicrotask(nextSteer);              // after this sync is done
+    if (c === 'center') { tilt.center = tilt.phi; toast('Straight ahead is how the phone is held now.', 2000); }
+  };
+  const sync = () => {
+    const now = performance.now(), want = new Set();
+    for (const f of fingers.values()) if (f.ctl && f.ctl !== 'stick') want.add(f.ctl);
+    const x = steer === 'stick' ? stick.x : steer === 'tilt' ? tilt.x : 0;
+    if (x < -STEER_KEY) want.add('left');
+    if (x > STEER_KEY) want.add('right');
+    for (const [c, t] of held) {
+      if (want.has(c)) continue;
+      if (now - t < MIN_HOLD) { clearTimeout(releaseT); releaseT = setTimeout(sync, MIN_HOLD - (now - t) + 1); continue; }
+      held.delete(c); send(c, false);
+    }
+    for (const c of want) if (!held.has(c)) { held.set(c, now); send(c, true); }
+  };
+  const stickTo = (dx) => {
+    const u = unit();
+    stick.x = dx == null ? 0 : Math.max(-1, Math.min(1, dx / u));
+    knob.style.setProperty('--dx', `${(stick.x * u).toFixed(1)}px`);
+    stickEl.classList.toggle('on', dx != null);
+  };
+  const ctlOf = (el) => (el instanceof Element ? el.closest('#touch [data-ctl]') : null);
+  const ctlAt = (x, y) => ctlOf(document.elementFromPoint(x, y))?.dataset.ctl || null;
+  // a finger keeps its control when it drifts off it, and slides to its neighbour (left and
+  // right, gas, brake and handbrake)
+  const slide = (cur, over) => (over && over !== cur && CTL[cur]?.group && CTL[over]?.group === CTL[cur].group ? over : cur);
+  const land = (id, el, x) => {
+    const c = el.dataset.ctl;
+    if (c !== 'stick') { fingers.set(id, { ctl: c }); return; }
+    if (![...fingers.values()].some((f) => f.ctl === 'stick')) fingers.set(id, { ctl: 'stick', x0: x });
+  };
+  const moved = (f, x, y) => { if (f.ctl === 'stick') stickTo(x - f.x0); else f.ctl = slide(f.ctl, ctlAt(x, y)); };
+  const refresh = () => { if (![...fingers.values()].some((f) => f.ctl === 'stick')) stickTo(null); sync(); };
+
+  // fingers: touch events, on window so every touch anywhere re-reads the whole list.
+  // preventDefault on touchstart is what stops iOS's long press (text selection, the callout,
+  // the magnifier); on pointerdown it doesn't.
+  const touches = (ev) => {
+    if (ev.type === 'touchstart') {
+      for (const t of ev.changedTouches) { const el = ctlOf(t.target); if (el) land('t' + t.identifier, el, t.clientX); }
+      if (ctlOf(ev.target)) { ev.preventDefault(); try { getSelection()?.removeAllRanges(); } catch {} }
+    }
+    const live = new Map([...ev.touches].map((t) => ['t' + t.identifier, t]));
+    for (const [id, f] of fingers) {
+      if (id[0] !== 't') continue;
+      const t = live.get(id);
+      if (t) moved(f, t.clientX, t.clientY); else fingers.delete(id);
+    }
+    refresh();
+    if (ev.type === 'touchend' && steer === 'tilt' && !tilt.heard) askTilt().then((ok) => { if (ok) tiltOn(); });   // a tap: iPhone may ask now
+  };
+  for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) window.addEventListener(type, touches, { capture: true, passive: false });
+  // a mouse (?touch=1 on a computer): pointer events
+  box.addEventListener('pointerdown', (ev) => {
+    const el = ctlOf(ev.target);
+    if (!el) return;
+    ev.preventDefault();
+    if (ev.pointerType !== 'mouse') return;            // fingers: the touch events above
+    try { el.releasePointerCapture(ev.pointerId); } catch {}   // so it can slide to another button
+    land('m' + ev.pointerId, el, ev.clientX); refresh();
+  });
+  window.addEventListener('pointermove', (ev) => { const f = fingers.get('m' + ev.pointerId); if (f) { moved(f, ev.clientX, ev.clientY); refresh(); } });
+  const lift = (ev) => { if (fingers.delete('m' + ev.pointerId)) refresh(); };
+  window.addEventListener('pointerup', lift);
+  window.addEventListener('pointercancel', lift);
+  const releaseAll = () => { fingers.clear(); refresh(); };
+  document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+  window.addEventListener('blur', releaseAll);
+  window.addEventListener('pagehide', releaseAll);
+  box.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  // no text selection anywhere while playing (the start page's fields are hidden then)
+  document.addEventListener('selectstart', (ev) => { if (!ev.target?.closest?.('input, textarea')) ev.preventDefault(); });
+
+  // tilt: steering is how far the phone is turned (like a wheel, about the screen's axis) from
+  // where it was held when tilt began or Straight ahead was pressed. The up direction, seen from
+  // the phone (W3C deviceorientation beta and gamma), turns the other way to the phone; the
+  // screen's own rotation only adds a constant, so portrait and either landscape read the same.
+  const onOrient = (e) => {
+    if (e.beta == null || e.gamma == null) return;
+    tilt.heard = true;
+    const b = e.beta * Math.PI / 180, g = e.gamma * Math.PI / 180;
+    const ux = -Math.cos(b) * Math.sin(g), uy = Math.sin(b);
+    if (Math.hypot(ux, uy) < 0.3) return;                   // lying nearly flat: no wheel to read
+    const phi = Math.atan2(ux, uy);
+    tilt.phi = phi;
+    if (tilt.center == null) tilt.center = phi;
+    let d = (tilt.center - phi) * 180 / Math.PI;
+    if (d > 180) d -= 360; else if (d < -180) d += 360;
+    const v = Math.abs(d) < 2 ? 0 : Math.sign(d) * Math.min(1, (Math.abs(d) - 2) / TILT_FULL);
+    tilt.x = tilt.x * 0.4 + v * 0.6;
+    if (steer === 'tilt') sync();
+  };
+  const tiltOn = () => {
+    removeEventListener('deviceorientation', onOrient); addEventListener('deviceorientation', onOrient);
+    clearTimeout(tilt.check);
+    tilt.check = setTimeout(() => { if (!tilt.heard && steer === 'tilt') toast("Tilt can't read the motion sensor in this browser. The round button at the top right switches to buttons.", 6000); }, 2500);
+  };
+  const tiltOff = () => { removeEventListener('deviceorientation', onOrient); clearTimeout(tilt.check); tilt.x = 0; };
+  const apply = () => {
+    box.dataset.steer = steer;
+    box.querySelector('.c-mode').innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${STEER_ICON[steer]}</svg>`;
+    for (const [id, f] of fingers) if (f.ctl === 'stick' || CTL[f.ctl]?.group === 'steer') fingers.delete(id);
+    stickTo(null);
+    if (steer === 'tilt') { tilt.center = null; tiltOn(); } else tiltOff();
+    sync();
+  };
+  const nextSteer = () => {
+    steer = STEER_MODES[(STEER_MODES.indexOf(steer) + 1) % STEER_MODES.length];
+    settings.touchSteer = steer; saveSettings();
+    log(`touch controls: steering with ${STEER_NAME[steer]}`);
+    toast(steer === 'tilt' ? 'Steering: tilt. Hold the phone like a wheel; the button beside this one sets straight ahead.'
+      : steer === 'stick' ? 'Steering: thumb stick. Put your thumb down anywhere on it and slide.' : 'Steering: buttons.', steer === 'tilt' ? 5000 : 3000);
+    apply();
+  };
+  apply();
+
+  // the mouse: where the game's 640x480 picture is in the canvas (letterboxed like runtime/gpu.c).
+  // The runtime multiplies mouse moves by 2.2 (runtime/dinput.c, mouse_scale) and the game's cursor
+  // then moves that many pixels (at the default mouse sensitivity): divide it back out.
+  const BOOST = 2.2;
+  const picture = () => {
+    const r = canvas.getBoundingClientRect(), p = mod._rt_gpu_stats() >> 3;
+    const fw = mod.HEAPF64[p + 4], fh = mod.HEAPF64[p + 5], a = fw > 0 && fh > 0 ? fw / fh : 4 / 3;
+    let w = r.width, h = r.height;
+    if (w / h > a) w = h * a; else h = w / a;
+    return { x: r.left + (r.width - w) / 2, y: r.top + (r.height - h) / 2, sx: 640 / w / BOOST, sy: 480 / h / BOOST };
+  };
+  let cur = null;                                      // { id, x, y, down } the finger driving the cursor
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (ev.pointerType === 'mouse' || cur) return;
+    ev.preventDefault();
+    const p = picture();
+    cur = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, p, down: false, fx: 0, fy: 0 };
+    // the game's cursor is relative (DirectInput): push it into the top-left corner, then to the finger
+    push(2, -4000, -4000);
+    push(2, Math.round((ev.clientX - p.x) * p.sx), Math.round((ev.clientY - p.y) * p.sy));
+    const c = cur;
+    setTimeout(() => { if (cur === c) { c.down = true; push(3, 1, 1); } }, 60);   // after the game has seen the cursor arrive
+  });
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!cur || ev.pointerId !== cur.id) return;
+    cur.fx += (ev.clientX - cur.x) * cur.p.sx; cur.fy += (ev.clientY - cur.y) * cur.p.sy;
+    cur.x = ev.clientX; cur.y = ev.clientY;
+    const dx = Math.trunc(cur.fx), dy = Math.trunc(cur.fy);
+    cur.fx -= dx; cur.fy -= dy;
+    if (dx || dy) push(2, dx, dy);
+  });
+  const up = (ev) => {
+    if (!cur || ev.pointerId !== cur.id) return;
+    const c = cur; cur = null;
+    if (c.down) push(3, 1, 0);
+    else { push(3, 1, 1); setTimeout(() => push(3, 1, 0), 60); }   // a quick tap: still a whole click
+  };
+  canvas.addEventListener('pointerup', up);
+  canvas.addEventListener('pointercancel', up);
+  // the same safety net for the cursor finger: no fingers left on the screen, so its button is up
+  const settle = (ev) => { if (cur && !ev.touches.length) up({ pointerId: cur.id }); };
+  window.addEventListener('touchend', settle, true);
+  window.addEventListener('touchcancel', settle, true);
+}
+
+// ------------------------------------------------------------------- controllers
+// Gamepads and wheels reach the game as DirectInput joysticks (runtime/dinput.c): every frame
+// each one's state goes into the runtime, 8 axes in DIJOYSTATE order (X Y Z Rx Ry Rz slider
+// slider, -1..1), 32 buttons and the hat. So the game's default joystick setup (steer on X, gas
+// and brake on Y) drives at once:
+//   standard pads: X = left stick, Y = brake - gas (the triggers; else the stick), Z = gas,
+//     Rz = brake (to map them apart), Rx/Ry = right stick; Start pauses, the d-pad also works menus
+//   wheels: X = the wheel; pedals (axes resting at an end) go 0..1 from rest, the first two also
+//     as Y (brake - gas) and alone as Z / Rz; the rest pass through.
+// The game only takes the controllers it found at start, and the browser only shows one after a
+// button press: the start page asks for a press and says what it found.
+const PAD_BYTES = 116;
+const padRest = new Map();          // gamepad id -> axis values when first seen (pedal detection)
+function padList() {
+  if (!settings.pads) return [];
+  let all = [];
+  try { all = [...(navigator.getGamepads?.() || [])].filter((p) => p && p.connected); } catch {}
+  return all.sort((a, b) => isWheel(b) - isWheel(a));      // a wheel is controller 1
+}
+const isWheel = (p) => /wheel|racing|driving force|g2[579]\b|g9[02]\b|g923|t150|t248|t300|tmx|t-gt|fanatec|thrustmaster|momo/i.test(p.id);
+const padName = (p) => p.id.replace(/\(.*?\)/g, '').replace(/standard gamepad/i, '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'Controller';
+const clamp1 = (v) => (v < -1 ? -1 : v > 1 ? 1 : v);
+function padState(p) {
+  const ax = (i) => p.axes[i] || 0;
+  const bv = (i) => (p.buttons[i] ? (typeof p.buttons[i].value === 'number' ? p.buttons[i].value : p.buttons[i].pressed ? 1 : 0) : 0);
+  const axes = new Float32Array(8);
+  let buttons = 0, pov = -1;
+  const hat = (u, r, d, l) => { const x = r - l, y = d - u; if (!x && !y) return -1; return Math.round(((Math.atan2(x, -y) * 18000 / Math.PI) + 36000) % 36000); };
+  if (p.mapping === 'standard') {
+    const gas = bv(7), brake = bv(6);
+    axes[0] = ax(0); axes[1] = clamp1(ax(1) + brake - gas); axes[2] = gas; axes[3] = ax(2); axes[4] = ax(3); axes[5] = brake;
+    [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 6, 7, 12, 13, 14, 15, 16].forEach((src, i) => { if (bv(src) > 0.5) buttons |= 1 << i; });
+    pov = hat(bv(12) > 0.5, bv(15) > 0.5, bv(13) > 0.5, bv(14) > 0.5);
+    return { wheel: false, axes, buttons, pov };
+  }
+  if (!padRest.has(p.id)) padRest.set(p.id, Array.from(p.axes));
+  const rest = padRest.get(p.id), pedals = [], other = [];
+  for (let i = 1; i < p.axes.length && i < 16; i++) {
+    if (i === 9 && p.axes.length > 9) continue;                   // the hat, on most wheels (below)
+    (Math.abs(rest[i] || 0) > 0.9 ? pedals : other).push(i);
+  }
+  const pedal = (i) => (i === undefined ? 0 : Math.max(0, Math.min(1, (rest[i] - ax(i)) * Math.sign(rest[i]) / 2)));
+  axes[0] = ax(0);
+  axes[1] = clamp1(pedal(pedals[1]) - pedal(pedals[0]));
+  axes[2] = pedal(pedals[0]); axes[5] = pedal(pedals[1]);
+  axes[3] = other[0] !== undefined ? ax(other[0]) : 0; axes[4] = other[1] !== undefined ? ax(other[1]) : 0;
+  axes[6] = pedal(pedals[2]); axes[7] = other[2] !== undefined ? ax(other[2]) : 0;
+  for (let i = 0; i < 32 && i < p.buttons.length; i++) if (bv(i) > 0.5) buttons |= 1 << i;
+  if (p.axes.length > 9 && ax(9) >= -1.01 && ax(9) <= 1.01) pov = Math.round((ax(9) + 1) / 2 * 7) * 4500;   // -1 up .. 1 up-left, ~1.29 centred
+  return { wheel: isWheel(p), axes, buttons, pov };
+}
+let padSeq = 0;
+const padPrev = { start: false, arrows: [false, false, false, false] };
+function writePads(mod, key) {
+  const base = mod._rt_web_pads?.(); if (!base) return;
+  const dv = new DataView(mod.HEAPU8.buffer), pads = padList();
+  padSeq++;
+  for (let k = 0; k < 2; k++) {
+    const o = base + k * PAD_BYTES, p = pads[k];
+    dv.setUint32(o, padSeq, true);
+    if (!p) { dv.setUint32(o + 4, 0, true); continue; }
+    const s = padState(p);
+    dv.setUint32(o + 4, 1, true); dv.setUint32(o + 8, s.wheel ? 1 : 0, true);
+    for (let i = 0; i < 8; i++) dv.setFloat32(o + 12 + 4 * i, s.axes[i], true);
+    dv.setUint32(o + 44, s.buttons >>> 0, true); dv.setInt32(o + 48, s.pov, true);
+    const name = new TextEncoder().encode(padName(p).replace(/[^\x20-\x7e]/g, '')).slice(0, 63);
+    mod.HEAPU8.set(name, o + 52); mod.HEAPU8[o + 52 + name.length] = 0;
+    if (k === 0 && key && p.mapping === 'standard') {              // Start pauses; the d-pad works the menus
+      const start = !!p.buttons[9]?.pressed;
+      if (start !== padPrev.start) { key('Escape', start); padPrev.start = start; }
+      ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].forEach((c, i) => {
+        const d = !!p.buttons[12 + i]?.pressed;
+        if (d !== padPrev.arrows[i]) { key(c, d); padPrev.arrows[i] = d; }
+      });
+    }
+  }
+}
+// start page: say which controller the game will get (or how to make it show up)
+function watchPads() {
+  const el = $('pad'); if (!el || !navigator.getGamepads) return;
+  const show = () => {
+    const pads = padList();
+    if (gameStarted && pads.length && !padsAtStart) { el.textContent = `${padName(pads[0])} connected: reload the page to drive with it.`; return; }
+    if (gameStarted) return;
+    el.textContent = !settings.pads ? 'Gamepads and wheels are off (Game Settings).'
+      : pads.length ? `Controller: ${pads.map(padName).join(', ')}. Choose it in Options › Controllers.` : 'Controller or wheel? Press any button on it before Start.';
+  };
+  watchPads.show = show;
+  window.addEventListener('gamepadconnected', (e) => { log(`controller connected: ${e.gamepad.id} (${e.gamepad.mapping || 'raw'} mapping, ${e.gamepad.axes.length} axes, ${e.gamepad.buttons.length} buttons)`); show();
+    if (gameStarted && !padsAtStart) { $('hint').textContent = 'Controller connected: reload the page to drive with it (the game looks for controllers at start)'; $('hint').hidden = false; } });
+  window.addEventListener('gamepaddisconnected', show);
+  show();
+}
+let padsAtStart = 0;
 
 // ------------------------------------------------------------------- audio
 // The AudioContext is made inside the Start click (Safari only lets audio start during the
 // click itself, not after the awaits in start()); startAudio() then plugs the game into it.
 let earlyAudio = null;
 function makeAudioContext() {
+  // iPhone: Web Audio counts as ringer sound, muted by the silent switch, unless the page says it
+  // plays media (Safari 17+, navigator.audioSession); set before the context is made
+  try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch {}
   try {
     const ctx = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
     ctx.resume().catch(() => {});
@@ -463,15 +859,26 @@ async function startAudio(mod) {
   const node = new AudioWorkletNode(ctx, 'ring-player', { outputChannelCount: [2] });
   node.port.postMessage({ buffer: mod.HEAPU8.buffer, ptr: mod._rt_web_audio(), beat: mod._rt_web_heartbeat() });
   node.port.onmessage = (e) => { const { under, secs } = e.data; if (under > 0.05 * 44100 * secs) log(`audio: ${(under / 441 / secs).toFixed(0)}% silence over ${secs.toFixed(0)} s (game mixed too little)`); };
-  node.connect(ctx.destination);
-  log('audio context:', ctx.state);
-  ctx.onstatechange = () => log('audio context:', ctx.state);
-  // browsers keep audio suspended until a user gesture: never wait for it here
-  if (ctx.state !== 'running') {
-    log('audio waits for a click or key press');
-    const resume = () => ctx.resume().then(() => { for (const e of ['pointerdown', 'keydown']) window.removeEventListener(e, resume, true); });
-    for (const e of ['pointerdown', 'keydown']) window.addEventListener(e, resume, true);
-  }
+  const gain = new GainNode(ctx, { gain: Math.max(0, Math.min(100, Number(settings.volume) || 0)) / 100 });
+  node.connect(gain).connect(ctx.destination);
+  log('audio context:', ctx.state, settings.volume !== 100 ? `(volume ${settings.volume}%)` : '', navigator.audioSession ? `(session ${navigator.audioSession.type})` : '');
+  // browsers keep audio suspended until a user gesture, and iOS stops it ("interrupted") for a
+  // call, Siri or switching apps: then the next touch, click or key press starts it again.
+  // Never wait for it here. Touches count as gestures on touchend, not on pointerdown.
+  const GESTURES = ['pointerdown', 'touchend', 'click', 'keydown'];
+  let armed = false;
+  const resume = () => ctx.resume().then(() => {
+    if (ctx.state !== 'running') return;
+    armed = false; for (const e of GESTURES) window.removeEventListener(e, resume, true);
+  }).catch(() => {});
+  const arm = () => {
+    if (armed || ctx.state === 'running' || ctx.state === 'closed') return;
+    armed = true; log('audio waits for a touch, click or key press');
+    for (const e of GESTURES) window.addEventListener(e, resume, true);
+  };
+  ctx.onstatechange = () => { log('audio context:', ctx.state); arm(); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && ctx.state !== 'running') { resume(); arm(); } });
+  arm();
   return ctx;
 }
 
@@ -506,7 +913,11 @@ const mark = (k) => { if (phase[k] == null) phase[k] = Math.round(performance.no
 async function start() {
   $('start').disabled = true;
   mark('click');
+  padsAtStart = padList().length;
+  if (touchWanted() && settings.touchSteer === 'tilt') askTilt();      // still inside the Start tap
+  if (padsAtStart) log(`controllers for the game: ${padList().map((p) => `${padName(p)} (${p.mapping || 'raw'}${isWheel(p) ? ', wheel' : ''})`).join(', ')}`);
   status('Loading the recompiled game…');
+  log('settings:', Object.entries(settings).map(([k, v]) => `${k}=${v}`).join(' '));
   await ensureIni();
   await writeGameName($('pname')?.value);
   const startT = performance.now();
@@ -529,7 +940,9 @@ async function start() {
       log('ERROR game exited, code', code); track('error', { kind: 'exit', msg: 'code ' + code }); gameStopped('The game closed itself (see the log). Reload the page to start again.');
     },
     // the screen in pixels, landscape: the game offers the resolutions that fit (glide.c)
-    arguments: ['/opfs/nfs4', `RT_SCREEN=${screenPixels()}`],
+    arguments: ['/opfs/nfs4', `RT_SCREEN=${settings.screen === 'auto' ? screenPixels() : settings.screen}`],
+    // controllers before the game looks for them (it does once, right at start)
+    preRun: [(m) => { try { writePads(m); } catch {} }],
     print: (t) => console.log(t),
     printErr: (t) => console.log(t),
   });
@@ -552,11 +965,12 @@ async function start() {
   const cover = $('loading'), badge = $('loadbadge');
   cover.hidden = false;
   const canvas = $('canvas');
-  attachInput(mod, canvas);
+  const key = attachInput(mod, canvas);
+  setInterval(() => writePads(mod, key), 8);                      // ~120 Hz, also with the tab in the background
   startAudio(mod).catch((e) => log('audio unavailable:', e.message || e));
 
   let fpsN = 0, fpsT = performance.now(), first = true, stalled = false, lastFresh = performance.now();
-  $('fps').hidden = false;
+  $('fps').hidden = !settings.fps;
   function frame() {
     if (gameDead) return;
     fitCanvas(canvas);
@@ -629,13 +1043,14 @@ async function deviceInfo() {
 // rendering up to 2560x1920. If frames are ready but the screen doesn't take them in time,
 // the next lower scale is used (and remembered in this browser). ?scale=N forces one.
 const hitch = { raf: 0, game: 0, frames: 0, lastFresh: 0, mainMs: 0, mainMax: 0, intervals: [] };
-const savedScale = () => { try { return Number(new URLSearchParams(location.search).get('scale')) || Number(localStorage.getItem('nfs4.maxScale')) || 3; } catch { return 3; } };
+const fixedScale = () => { try { return Number(new URLSearchParams(location.search).get('scale')) || Number(settings.quality) || 0; } catch { return 0; } };
+const savedScale = () => { try { return fixedScale() || Number(localStorage.getItem('nfs4.maxScale')) || 3; } catch { return 3; } };
 function startPerfLog(mod) {
   if (net.id) log(`net: room ${net.room} (${net.info?.name || ''}) as "${$('pname')?.value || ''}" id ${net.id}`);
-  const forced = (() => { try { return new URLSearchParams(location.search).has('scale'); } catch { return false; } })();
+  const forced = !!fixedScale();
   let maxScale = savedScale(), slow = 0;
   mod._rt_gpu_set_max_scale(maxScale);
-  log(`perf: render scale limit ${maxScale}${forced ? ' (forced by ?scale)' : ''}`);
+  log(`perf: render scale limit ${maxScale}${forced ? ' (fixed: Sharpness setting or ?scale)' : ''}`);
   const stats = () => { const p = mod._rt_gpu_stats() >> 3; return Array.from(mod.HEAPF64.subarray(p, p + 6)); };
   let t = performance.now(), prev = stats();
   setInterval(() => {
@@ -976,6 +1391,10 @@ async function init() {
   setupOnline();
   setupActivity();
   setupChangelog('nfs4.');
+  setupSettings();
+  watchPads();
+  showHomeScreenCard();
+  if (isWebApp()) log('started from the home screen (web app)');
   log('page loaded; crossOriginIsolated =', crossOriginIsolated, '; SharedArrayBuffer =', typeof SharedArrayBuffer);
   if (!crossOriginIsolated) {
     // the server sends COOP/COEP (serve.mjs); a browser that still isn't isolated is too old or locked down
@@ -1041,7 +1460,10 @@ async function init() {
     phase.download = Math.round((performance.now() - d0) / 100) / 10; mark('files');
   }
   if (new URLSearchParams(location.search).has('autostart') && (await hasGame())) { start().catch((e) => { console.error('Failed to start:', e.stack || e); status('Failed to start: ' + e.message, true); $('setup-wrap').hidden = false; }); }
-  $('start').addEventListener('click', () => { if (!earlyAudio) earlyAudio = makeAudioContext(); start().catch((e) => { console.error(e); status('Failed to start: ' + e.message, true); $('start').disabled = false; }); });
+  $('start').addEventListener('click', () => {
+    if (!earlyAudio) earlyAudio = makeAudioContext();
+    if (settings.fullscreen && fsSupported() && !fsElement()) toggleFullscreen();   // only allowed inside the click
+    start().catch((e) => { console.error(e); status('Failed to start: ' + e.message, true); $('start').disabled = false; }); });
   await refresh();
 }
 init();

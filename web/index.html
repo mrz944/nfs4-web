@@ -2,11 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>NFS4 High Stakes</title>
 <meta name="description" content="Need for Speed: High Stakes (1999) recompiled to run in your browser. Original handling, tracks, cops and music, no install, online races with friends.">
 <meta name="theme-color" content="#02050f">
 <meta name="author" content="Marcin Zadka">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NFS4">
 <link rel="canonical" href="https://nfs4.xyz/">
 <link rel="icon" href="/favicon.ico" sizes="48x48">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
@@ -51,7 +54,7 @@
   html, body { margin: 0; min-height: 100%; background: var(--night); color: var(--text); font: 13px/1.6 var(--ui); }
   /* the pixel font stays crisp: no smoothing on anything set in it */
   .mbtn, button, label.btn, .pill, .tag, .ticker, .badge, .counter i, .specs dt, h3.minor, .bar h3, .tip b, .maker b, .more b, .more a span, #online label, #rooms th,
-  #fps, #hint, #netbadge, #loadbadge, #loading-text, .steps li::before, #top-list .r, #beta b { -webkit-font-smoothing: none; -moz-osx-font-smoothing: unset; font-smooth: never; }
+  #fps, #hint, #netbadge, #loadbadge, #loading-text, .opt b, .opt output, #touch .tk, .steps li::before, #top-list .r, #beta b { -webkit-font-smoothing: none; -moz-osx-font-smoothing: unset; font-smooth: never; }
   a { color: var(--cyan); text-underline-offset: 2px; }
   ::selection { background: var(--aqua); color: var(--ink); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -63,7 +66,8 @@
   #bg .scan { position: absolute; inset: 0; background: repeating-linear-gradient(0deg, rgba(0, 0, 0, .16) 0 1px, transparent 1px 3px); }
 
   /* --------------------------------------------------------------- frame */
-  #setup-wrap { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; max-width: 1100px; margin: 0 auto; padding: 18px 16px 10px; }
+  #setup-wrap { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; max-width: 1100px; margin: 0 auto;
+    padding: calc(18px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left)); }
   header { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 6px 14px; }
   .logo { position: relative; max-width: 100%; line-height: 0; }
   #logo { display: block; max-width: 100%; height: auto; image-rendering: pixelated; image-rendering: crisp-edges;
@@ -227,9 +231,9 @@
   /* -------------------------------------------------------------- in game */
   #screen { display: none; position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; background: #000; }
   canvas#canvas { width: 100%; height: 100%; display: block; image-rendering: auto; }
-  #fps { position: fixed; z-index: 3; right: 10px; bottom: 8px; color: #fff9; font: 400 16px var(--px); pointer-events: none; }
-  #hint { position: fixed; z-index: 3; left: 12px; bottom: 8px; color: #fff8; font: 400 16px var(--px); text-transform: uppercase; pointer-events: none; }
-  #fullscreen { position: fixed; z-index: 4; right: 8px; top: 8px; width: 34px; height: 34px; display: grid; place-items: center; padding: 0;
+  #fps { position: fixed; z-index: 3; right: calc(10px + env(safe-area-inset-right)); bottom: calc(8px + env(safe-area-inset-bottom)); color: #fff9; font: 400 16px var(--px); pointer-events: none; }
+  #hint { position: fixed; z-index: 3; left: calc(12px + env(safe-area-inset-left)); bottom: calc(8px + env(safe-area-inset-bottom)); color: #fff8; font: 400 16px var(--px); text-transform: uppercase; pointer-events: none; }
+  #fullscreen { position: fixed; z-index: 4; right: calc(8px + env(safe-area-inset-right)); top: calc(8px + env(safe-area-inset-top)); width: 34px; height: 34px; display: grid; place-items: center; padding: 0;
     background: rgba(0, 0, 0, .45); box-shadow: inset 0 0 0 2px #fff4; color: #fffc; opacity: .55; text-shadow: none; }
   #fullscreen:hover, #fullscreen:focus-visible { opacity: 1; }
   #fullscreen[hidden] { display: none; }
@@ -237,7 +241,7 @@
   #fullscreen .fs-off, body.fs #fullscreen .fs-on { display: none; }
   body.fs #fullscreen .fs-off { display: inline; }
   body.locked #fullscreen { opacity: 0; pointer-events: none; }
-  #netbadge { position: fixed; left: 10px; top: 8px; z-index: 4; color: #fff; padding: 5px 12px 4px 16px; font: 700 16px/1 var(--px); cursor: pointer; max-width: 70vw; text-shadow: 2px 2px 0 #000;
+  #netbadge { position: fixed; left: calc(10px + env(safe-area-inset-left)); top: calc(8px + env(safe-area-inset-top)); z-index: 4; color: #fff; padding: 5px 12px 4px 16px; font: 700 16px/1 var(--px); cursor: pointer; max-width: 70vw; text-shadow: 2px 2px 0 #000;
     clip-path: var(--pill); background: linear-gradient(90deg, var(--aqua) 0 4px, transparent 4px), linear-gradient(180deg, rgba(60, 90, 220, .9), rgba(10, 20, 90, .9)); }
   #log { margin-top: 12px; max-height: 220px; overflow: auto; background: rgba(0, 0, 16, .85); box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #24328a; padding: 8px;
     font: 12px/1.4 ui-monospace, "Courier New", monospace; color: #9fb0e6; white-space: pre-wrap; word-break: break-all; }
@@ -265,6 +269,83 @@
   #beta { margin: 0 0 10px; line-height: 1.5; background: rgba(24, 16, 0, .78); box-shadow: inset 3px 0 0 var(--amber), inset 0 2px 0 #4a3a10, inset -2px -2px 0 #4a3a10; }
   #beta b { display: block; font: 700 16px/1.3 var(--px); text-transform: uppercase; color: var(--amber); }
 
+  /* ------------------------------------------------------------ settings */
+  .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; margin-top: 8px; }
+  @media (max-width: 600px) { .opts { grid-template-columns: 1fr; } }
+  .opt { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 7px 8px; cursor: pointer; background: rgba(1, 6, 36, .55); box-shadow: inset 2px 0 0 #2c3c94; }
+  .opt:hover { box-shadow: inset 2px 0 0 var(--aqua); }
+  .opt b { display: block; color: #fff; font: 700 16px/1.25 var(--px); text-transform: uppercase; }
+  .opt i { display: block; font-style: normal; color: var(--muted); font-size: 11px; line-height: 1.4; }
+  .opt.sel { grid-template-columns: 1fr; cursor: default; }
+  .opt input[type=checkbox] { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin: 1px 0 0; background: #010624; cursor: pointer;
+    box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #34489c; }
+  .opt input[type=checkbox]:checked { background: linear-gradient(var(--aqua), var(--aqua)) 5px 5px / 8px 8px no-repeat, #010624; }
+  .opt select { background: #010624; color: var(--text); border: 0; border-radius: 0; padding: 5px 7px; font: 13px var(--ui); width: 100%; box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #34489c; }
+  .opt .range { display: flex; align-items: center; gap: 10px; } .opt input[type=range] { flex: 1; accent-color: var(--aqua); } .opt output { min-width: 3.2em; color: var(--aqua); font: 700 16px var(--px); }
+  .modsmall { font-size: 11px; color: var(--muted); } .modsmall b { color: #fff; }
+  #mods .opt { margin-top: 6px; } #mods-line { margin: 8px 0 0; font-weight: bold; } #mods-line.err { color: var(--err); }
+
+  /* --------------------------------------------------------------- touch */
+  /* Every control sits on its own (u = one pixel at this size, --ts from the Touch size setting
+     and the screen); "start" is the steering side, "end" the pedals' (swapped: direction rtl). */
+  #touch { --ts: 1; --u: calc(1px * var(--ts)); position: fixed; inset: 0; z-index: 3; pointer-events: none;
+    --l: max(12px, env(safe-area-inset-left)); --r: max(12px, env(safe-area-inset-right)); --b: max(12px, env(safe-area-inset-bottom));
+    --t: calc(8px + env(safe-area-inset-top)); --row: var(--t); --S: var(--l); --E: var(--r);
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #touch[data-swap] { direction: rtl; --S: var(--r); --E: var(--l); }
+  body:has(#netbadge:not([hidden])) #touch { --row: calc(var(--t) + 40px); }
+  #touch *, #screen, #screen * { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #touch[hidden], #touch.away { display: none; }
+  #touch .tk { position: absolute; pointer-events: auto; touch-action: none; padding: 0; display: grid; place-items: center;
+    background: rgba(0, 6, 40, .38); box-shadow: inset 0 0 0 2px rgba(62, 242, 208, .5); color: #fffd; font: 700 calc(15 * var(--u))/1 var(--px);
+    text-shadow: 1px 1px 0 #000; opacity: .65; -webkit-tap-highlight-color: transparent; }
+  #touch .tk:hover { background: rgba(0, 6, 40, .38); }
+  #touch .tk.on { background: rgba(62, 242, 208, .55); color: #000; text-shadow: none; opacity: 1; }
+  #touch .tk svg { width: 42%; height: 42%; fill: currentColor; }
+  #touch .tk.tsmall { width: calc(44 * var(--u)); height: calc(44 * var(--u)); border-radius: 50%; top: var(--row); }
+  #touch .tk.tsmall svg { width: 52%; height: 52%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #touch .tk.tsmall svg .fill { fill: currentColor; stroke: none; }
+  #touch .tk.tpill { height: calc(40 * var(--u)); bottom: calc(var(--b) + 116 * var(--u)); }
+  #touch .tk.c-ok { bottom: calc(var(--b) + 160 * var(--u)); }
+  /* steering: two buttons, or the stick's track, or (tilt) nothing: the brake moves over */
+  #touch .c-left, #touch .c-right { bottom: var(--b); width: calc(80 * var(--u)); height: calc(104 * var(--u)); }
+  #touch .c-left { inset-inline-start: var(--S); }
+  #touch .c-right { inset-inline-start: calc(var(--S) + 88 * var(--u)); }
+  #touch[data-swap] .c-left { inset-inline-start: calc(var(--S) + 88 * var(--u)); }
+  #touch[data-swap] .c-right { inset-inline-start: var(--S); }
+  #touch .tstick { position: absolute; pointer-events: auto; touch-action: none; inset-inline-start: var(--S); bottom: var(--b); width: calc(168 * var(--u)); height: calc(104 * var(--u));
+    border-radius: calc(52 * var(--u)); background: rgba(0, 6, 40, .25); box-shadow: inset 0 0 0 2px rgba(62, 242, 208, .3); opacity: .8; }
+  #touch .tstick i { position: absolute; left: 50%; top: 50%; width: calc(60 * var(--u)); height: calc(60 * var(--u)); border-radius: 50%;
+    transform: translate(calc(-50% + var(--dx, 0px)), -50%); background: rgba(0, 6, 40, .45); box-shadow: inset 0 0 0 2px rgba(62, 242, 208, .6); }
+  #touch .tstick.on i { background: rgba(62, 242, 208, .55); }
+  /* pedals */
+  #touch .c-gas { inset-inline-end: var(--E); bottom: var(--b); width: calc(84 * var(--u)); height: calc(148 * var(--u)); }
+  #touch .c-brake { inset-inline-end: calc(var(--E) + 92 * var(--u)); bottom: var(--b); width: calc(84 * var(--u)); height: calc(104 * var(--u)); }
+  #touch .c-hb { inset-inline-end: calc(var(--E) + 106 * var(--u)); bottom: calc(var(--b) + 116 * var(--u)); width: calc(56 * var(--u)); height: calc(56 * var(--u));
+    border-radius: 50%; font-size: calc(13 * var(--u)); }
+  #touch .c-ok { inset-inline-end: var(--E); width: calc(84 * var(--u)); }
+  #touch .c-esc { inset-inline-start: var(--S); width: calc(72 * var(--u)); }
+  #touch[data-steer=tilt] .c-brake { inset-inline-end: auto; inset-inline-start: var(--S); }
+  #touch[data-steer=tilt] .c-hb { inset-inline-end: auto; inset-inline-start: calc(var(--S) + 96 * var(--u)); bottom: var(--b); }
+  /* the row along the top: race buttons on the left, the steering switch by the fullscreen button */
+  #touch .c-cam { left: var(--l); }
+  #touch .c-look { left: calc(var(--l) + 52 * var(--u)); }
+  #touch .c-mode { top: var(--t); right: calc(var(--r) + 42px); }
+  #touch .c-center { top: var(--t); right: calc(var(--r) + 42px + 52 * var(--u)); }
+  #touch:not([data-steer=buttons]) :is(.c-left, .c-right), #touch:not([data-steer=stick]) .tstick, #touch:not([data-steer=tilt]) .c-center { display: none; }
+  #touch .ttoast { direction: ltr; position: absolute; left: 50%; top: 28%; transform: translateX(-50%); max-width: min(90vw, 460px); padding: 8px 14px; text-align: center;
+    background: rgba(0, 0, 0, .7); color: var(--aqua); font: 700 14px/1.3 var(--px); }
+  #touch .trotate { position: absolute; top: calc(56px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: none; padding: 6px 12px; white-space: nowrap;
+    background: rgba(0, 0, 0, .6); color: var(--aqua); font: 700 14px var(--px); text-transform: uppercase; }
+  @media (orientation: portrait) { #touch .trotate { display: block; } }
+  body:not(.touchdev) .touch-set { display: none; }
+  body.touch #hint { display: none; }
+  body.touch #fps { bottom: auto; top: calc(54px + env(safe-area-inset-top)); }
+  /* iPhone Safari can't go fullscreen: the button explains Add to Home Screen instead (setupFullscreen) */
+  #fstip { position: fixed; z-index: 5; top: calc(50px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right)); max-width: min(330px, calc(100vw - 16px));
+    padding: 10px 12px; font: 13px/1.45 var(--ui); color: var(--text); background: rgba(1, 6, 36, .94); clip-path: var(--notch);
+    box-shadow: inset 2px 0 0 var(--aqua), inset 0 -2px 0 #1a2a7c, inset -2px 0 0 #1a2a7c, inset 0 2px 0 #1a2a7c; }
+  #fstip[hidden], #ios-app[hidden] { display: none; }
   /* loading cover over the game until it really draws, and the small badge for later stalls */
   #loading { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; text-align: center;
     background: radial-gradient(ellipse at 50% 45%, #10288a 0%, #050d38 55%, #01030c 100%); }
@@ -315,6 +396,7 @@
       <button id="start" class="mbtn go" hidden>Start Game</button>
       <label class="btn mbtn" id="pick-label" hidden>Choose NFS4 Folder…<input type="file" id="pick" webkitdirectory multiple></label>
       <a class="mbtn" href="#online">Online Play…</a>
+      <a class="mbtn" href="#settings">Settings…</a>
       <a class="mbtn" href="#guide">How to Race…</a>
       <a class="mbtn" href="#work">What We Built…</a>
       <a class="mbtn" href="#about">Read Me…</a>
@@ -322,6 +404,7 @@
       <div class="sep"></div>
       <button id="forget" class="mbtn dim" hidden>Remove Game Files</button>
       <div class="hint">Pick your NFS4 folder once (with the <a href="https://veg.by/files/nfs4/" target="_blank" rel="noopener">Modern Patch beta</a>). It is copied into this browser's private storage and never uploaded.</div>
+      <div class="hint" id="pad"></div>
       <div class="tip"><b>tip of the day</b><span id="tip">High Stakes race: the loser hands over the pink slip.</span></div>
       <div class="maker"><b>created by</b>
         <a href="https://github.com/mrz944" target="_blank" rel="noopener">Marcin Zadka</a><br>
@@ -340,6 +423,7 @@
         happen. Single and online races are tested; Career, Hot Pursuit and High Stakes modes haven't been played
         through yet. If something breaks, reloading the page usually helps. Please report problems on
         <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">Discord</a> or <a href="https://github.com/mrz944/nfs4-web/issues" target="_blank" rel="noopener">GitHub</a>.</div>
+      <div id="ios-app" class="card" hidden><b>Fullscreen on iPhone:</b> open Safari's Share menu (on iOS 26 tap ⋯ first), choose <b>Add to Home Screen</b>, then start the game from its new icon. It has its own storage, so you pick the game folder once more there. <button id="ios-app-ok" class="small secondary">Got it</button></div>
       <div id="update" class="card" hidden>A newer version of the game is on the server. <button id="update-reload" class="small">Reload to update</button></div>
       <section class="panel">
         <div class="ph"><h2>status</h2></div>
@@ -415,6 +499,35 @@
         </div>
       </section>
 
+      <section class="panel" id="settings">
+        <div class="ph"><h2>game settings</h2><button id="set-reset" class="small secondary" title="Back to the default settings">Defaults</button></div>
+        <div class="pb">
+          <p class="muted">Used every time you click <b>Start Game</b>, saved in this browser. Car, controls, sound and detail are in the game's own Options menu.</p>
+          <div class="opts">
+            <label class="opt"><input type="checkbox" data-set="fullscreen"><span><b>Start in fullscreen</b><i>Alt+Enter switches during the game.</i></span></label>
+            <label class="opt"><input type="checkbox" data-set="fps"><span><b>FPS counter</b><i>Frames per second, bottom right.</i></span></label>
+            <label class="opt"><input type="checkbox" data-set="movies"><span><b>Intro movies</b><i>The EA intro and the menu movies. Off by default: in some browsers they can stall the start.</i></span></label>
+            <label class="opt"><input type="checkbox" data-set="pads"><span><b>Gamepads and wheels</b><i>Off hides controllers from the game. On: choose yours in Options › Controllers.</i></span></label>
+            <label class="opt sel touch-set"><b>Touch steering</b><select data-set="touchSteer">
+              <option value="buttons">Buttons</option><option value="stick">Thumb stick (slide)</option><option value="tilt">Tilt the phone</option><option value="off">Off (no touch controls)</option>
+            </select><i>The round button at the top right switches during the game. The stick and tilt press the arrow keys once you steer past a third of the way.</i></label>
+            <label class="opt sel touch-set"><b>Touch size</b><select data-set="touchSize">
+              <option value="auto">Auto</option><option value="0.85">Small</option><option value="1.15">Large</option><option value="1.3">Largest</option>
+            </select><i>Auto sizes the buttons for this screen.</i></label>
+            <label class="opt touch-set"><input type="checkbox" data-set="touchSwap"><span><b>Steer with the right thumb</b><i>Steering on the right, gas and brake on the left.</i></span></label>
+            <label class="opt sel"><b>Resolutions</b><select data-set="screen">
+              <option value="auto" id="set-screen-auto">Up to this screen</option>
+              <option value="1280x720">Up to 960×720</option><option value="1920x1080">Up to 1440×1080</option>
+              <option value="2560x1440">Up to 1920×1440</option><option value="3840x2160">Up to 2880×2160</option>
+            </select><i>The 4:3 modes the game offers in Options › Graphics › Screen Size. Lower is faster on weak GPUs.</i></label>
+            <label class="opt sel"><b>Sharpness</b><select data-set="quality">
+              <option value="auto">Auto</option><option value="1">Fast (1×)</option><option value="2">Balanced (2×)</option><option value="3">Sharp (3×)</option><option value="4">Sharpest (4×)</option>
+            </select><i>How many times the game picture is rendered over before it's scaled to the screen. Auto lowers it when the GPU falls behind.</i></label>
+            <label class="opt sel"><b>Volume</b><span class="range"><input type="range" min="0" max="100" step="5" data-set="volume"><output id="set-volume-out">100%</output></span><i>On top of the game's own sound settings.</i></label>
+          </div>
+        </div>
+      </section>
+
       <section class="panel" id="guide">
         <div class="ph"><h2>how to race online</h2></div>
         <div class="pb">
@@ -441,6 +554,7 @@
           <dl class="specs">
             <dt>Via server</dt><dd>If two browsers can't connect directly (strict routers), packets go through this server instead. It works, just a little slower.</dd>
             <dt>Keep it visible</dt><dd>Leave every game window open while racing. A minimised tab can fall behind.</dd>
+            <dt>Controllers</dt><dd>Gamepads and wheels work. Press a button on yours before <i>Start Game</i> (the browser only shows it after a press), then set it up in <b>Options → Controllers</b>. On a pad the triggers are gas and brake and Start pauses.</dd>
             <dt>Names</dt><dd>Your lobby name is written into the game before it starts; it shows in the game's name dialog and in the race.</dd>
           </dl>
         </div>
@@ -517,8 +631,25 @@
 
 <div id="screen"><canvas id="canvas" width="640" height="480"></canvas></div>
 <div id="fps" hidden></div>
+<div id="touch" hidden>
+  <button type="button" class="tk tpill c-esc" data-ctl="esc" aria-label="Escape: pause, back">ESC</button>
+  <button type="button" class="tk tpill c-ok" data-ctl="ok" aria-label="Enter: OK">OK</button>
+  <button type="button" class="tk c-left" data-ctl="left" aria-label="Steer left"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M7.5 1 1.5 5l6 4z"/></svg></button>
+  <button type="button" class="tk c-right" data-ctl="right" aria-label="Steer right"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 1l6 4-6 4z"/></svg></button>
+  <div class="tstick" data-ctl="stick" aria-label="Steering: slide left or right"><i></i></div>
+  <button type="button" class="tk c-hb" data-ctl="hb" aria-label="Handbrake">HB</button>
+  <button type="button" class="tk c-brake" data-ctl="brake" aria-label="Brake, reverse, menu down"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 2.5h8L5 8.5z"/></svg></button>
+  <button type="button" class="tk c-gas" data-ctl="gas" aria-label="Gas, menu up"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 7.5h8L5 1.5z"/></svg></button>
+  <button type="button" class="tk tsmall c-cam" data-ctl="cam" aria-label="Camera view"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2h6l2 2h3v10H4z"/><circle cx="12" cy="13" r="3"/></svg></button>
+  <button type="button" class="tk tsmall c-look" data-ctl="look" aria-label="Look behind (hold)"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="10" rx="5"/><path d="M12 15v4M9 19h6M15 10H9.5M11.5 8 9.5 10l2 2"/></svg></button>
+  <button type="button" class="tk tsmall c-center" data-ctl="center" aria-label="Straight ahead is how the phone is held now"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg></button>
+  <button type="button" class="tk tsmall c-mode" data-ctl="mode" aria-label="Steering: buttons, stick or tilt"></button>
+  <div class="ttoast" role="status" hidden></div>
+  <div class="trotate">Turn your phone sideways</div>
+</div>
 <div id="netbadge" hidden title="Click to copy the room link"></div>
 <button id="fullscreen" type="button" hidden title="Fullscreen (Alt+Enter)" aria-label="Fullscreen"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path class="fs-on" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /><path class="fs-off" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" /></svg></button>
+<div id="fstip" hidden role="status"><b>Fullscreen on iPhone:</b> Safari only lets videos go fullscreen. Open the Share menu (on iOS 26 tap ⋯ first), choose <b>Add to Home Screen</b> and play from that icon: no address bar, the whole screen.</div>
 <div id="hint" hidden>Click to capture the mouse · Esc releases it · Alt+Enter fullscreen</div>
 <div id="loading" hidden><div><div class="ltitle">high stakes</div><div id="loading-text">Loading the game…</div><div class="lbar"><i></i></div></div></div>
 <div id="loadbadge" hidden>Loading…</div>

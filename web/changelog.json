@@ -8,7 +8,10 @@
       ["fixed", "Running out of memory after many races: finished game threads give their memory back."],
       ["improved", "A clear message when the browser can't draw the game (WebGL2 off) or is too old, before anything downloads."],
       ["improved", "The game runs in one tab at a time, and phones no longer ask to capture the mouse."],
-      ["improved", "A sturdier server and relay."]
+      ["improved", "A sturdier server and relay."],
+      ["new", "Gamepads and steering wheels: press a button before Start, then choose it in Options › Controllers."],
+      ["new", "iPhone and Android: touch controls (buttons, thumb stick or tilt), game files saved on iOS 18 Safari, sound with the silent switch on, and an Add to Home Screen tip for fullscreen."],
+      ["new", "Game Settings on the start page: start in fullscreen, FPS counter, intro movies, controllers, resolution cap, sharpness and volume."]
     ] },
     { "date": "2026-11-12", "items": [
       ["new", "Discord server for help, bug reports, ideas and finding races: linked in the menu and in the beta note."],

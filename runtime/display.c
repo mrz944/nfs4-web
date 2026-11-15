@@ -140,6 +140,22 @@ static void *script_main(void *p) {
             rt_log("input: memory dump %s", p);
             continue;
         }
+        if (!strncasecmp(k, "JOY@", 4) || !strncasecmp(k, "JOYB@", 5)) {   /* controller 1: JOY@axis;value, JOYB@button+ms */
+            typedef struct { uint32_t seq, connected, wheel; float axes[8]; uint32_t buttons; int32_t pov; char name[64]; } Pad;
+            extern void *dinput_pads(void); Pad *pd = dinput_pads();
+            sleep_until_ms(t);
+            pd->connected = 1; pd->pov = -1; if (!pd->name[0]) snprintf(pd->name, sizeof pd->name, "Test controller");
+            if (k[3] == '@') {
+                int ax = atoi(k + 4); char *semi = strchr(k, ';'); float v = semi ? (float)atof(semi + 1) : 0;
+                if (ax >= 0 && ax < 8) pd->axes[ax] = v;
+                rt_log("input: controller axis %d = %.2f (t=%llums)", ax, v, (unsigned long long)t);
+            } else {
+                int bt = atoi(k + 5); if (bt < 0 || bt > 31) continue;
+                rt_log("input: controller button %d (t=%llums)", bt, (unsigned long long)t);
+                pd->buttons |= 1u << bt; usleep(hold * 1000); pd->buttons &= ~(1u << bt);
+            }
+            continue;
+        }
         if (!strncasecmp(k, "MOVE@", 5)) {           /* MOVE@x;y: move only (same coordinates as CLICK) */
             int x = atoi(k + 5), y = 0; char *semi = strchr(k, ';'); if (semi) y = atoi(semi + 1);
             sleep_until_ms(t);

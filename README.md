@@ -56,7 +56,8 @@ It's the same approach as [NFS3 Web](https://github.com/mrz944/nfs3-web); most o
    CD, then the [Modern Patch beta](https://veg.by/files/nfs4/) on top.
 2. Open **[nfs4.xyz](https://nfs4.xyz)** in Chrome, Edge, Firefox or Safari (WebGL 2 needed).
 3. Click **Choose NFS4 Folder…** and pick that folder (about 530 MB, copied once).
-4. Click **Start Game**. For online races, make a room, share the invite link, and in the game pick
+4. Optional: **Settings…** on the start page (fullscreen, FPS counter, intro movies, controllers, resolutions, sharpness, volume, touch controls).
+5. Click **Start Game**. For online races, make a room, share the invite link, and in the game pick
    **Connect Players → Network (IPX)**. The page has a step-by-step guide.
 
 The page sets what the browser build needs in each copy of `nfs4.ini` (`ThrashDriver=glide3x`,
@@ -71,6 +72,7 @@ The page sets what the browser build needs in each copy of `nfs4.ini` (`ThrashDr
 | **Single-core mode** | NFS4 is not safe on a multi-core CPU. That's why the modern patch has `SingleProcAffinity=1`. Its file streamer, for example, checks a chunk before locking it (abort: *"STREAM_release - chunk has already been released"*), and busy-waits for its reader thread without calling the OS. The runtime emulates one core: only one guest thread runs at a time. It is handed over at blocking API calls, by thread priority as on Windows, with a 4 ms time slice among equals. The lifter puts a preemption check (one flag test) on every loop back-edge so that busy-waits hand over too. `RT_MULTICORE=1` turns it off. |
 | **File lookups** | Case-insensitive paths with cached folder listings: in the browser each folder read costs ~30 ms, and the front end probes hundreds of files that don't exist. |
 | **Online** | NFS4's IPX mode runs on the same virtual LAN. NFS4 adds a choice that NFS3 didn't have: **Positional Updates** vs **Controller Updates** (see below). |
+| **Controllers and phones** | Gamepads and wheels reach the game as DirectInput joysticks (choose them in Options → Controllers; NFS4 doesn't switch to one by itself). On phones, touch controls press the game's keys: arrows, Space (handbrake), C (camera), B (look behind), Enter, Esc; steering by buttons, thumb stick or tilt. |
 | **Page** | Lo-fi pixel styling after NFS4's own front end, with its own emblem. The lobby name is written into `data/TEXT/TEXT.ENG` (default name) and `savedata/config.dat` (offset `0xF2C`). |
 
 ## Online play: how NFS4 does it
