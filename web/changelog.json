@@ -3,16 +3,13 @@
   "about": "What changed on nfs4.xyz, day by day. Kinds: new, improved, fixed. Days run 05:00 to 05:00 Polish time. nfs3-webgl's tools/discord/changelog.mjs posts them to Discord.",
   "days": [
     { "date": "2026-11-15", "items": [
-      ["fixed", "Crackling, robotic sound in the browser: the sound now follows your speakers' pace."],
-      ["fixed", "Running out of memory after long sessions: textures the game replaces are now freed."],
-      ["fixed", "Running out of memory after many races: finished game threads give their memory back."],
-      ["improved", "A clear message when the browser can't draw the game (WebGL2 off) or is too old, before anything downloads."],
-      ["improved", "The game runs in one tab at a time, and phones no longer ask to capture the mouse."],
-      ["improved", "A sturdier server and relay."],
-      ["new", "Gamepads and steering wheels: press a button before Start, then choose it in Options › Controllers."],
-      ["new", "iPhone and Android: touch controls (buttons, thumb stick or tilt), game files saved on iOS 18 Safari, sound with the silent switch on, and an Add to Home Screen tip for fullscreen."],
-      ["new", "Game Settings on the start page: start in fullscreen, FPS counter, intro movies, controllers, resolution cap, sharpness and volume."],
-      ["improved", "Online: a dropped connection rejoins its room within 20 seconds instead of leaving it, and direct links can go through TURN relays near each player."]
+      ["fixed", "Crackling, robotic sound in the browser."],
+      ["fixed", "Running out of memory after long sessions or many races."],
+      ["new", "Gamepads and wheels: press a button before Start, then pick it in Options › Controllers."],
+      ["new", "Phones: touch controls (buttons, stick or tilt); iPhone saves on iOS 18, sound with the silent switch on."],
+      ["new", "Game Settings: fullscreen, FPS counter, intro movies, resolutions, sharpness, volume."],
+      ["improved", "Clear messages when the browser can't run the game; one tab at a time."],
+      ["improved", "Online: dropped players rejoin within 20 s; TURN relays for strict routers; a sturdier server."]
     ] },
     { "date": "2026-11-12", "items": [
       ["new", "Discord server for help, bug reports, ideas and finding races: linked in the menu and in the beta note."],
