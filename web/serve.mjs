@@ -175,6 +175,49 @@ function live(res) {
   res.end(JSON.stringify({ ...liveSummary(), top: topRacers(), daily: daily ? { next: daily.next(), time: daily.time } : null, build }));
 }
 
+// ICE servers for the page's WebRTC links (/__ice). A third of the direct links never come up
+// (both players behind strict routers) and fall back to this server, which is far from many
+// players. With a Cloudflare TURN key in build/cloudflare/turn.json ({"id": ..., "token": ...},
+// from the dashboard's Realtime > TURN; free up to 1 TB a month) the page also gets TURN
+// servers on Cloudflare's edge near each player: short-lived credentials, minted here and
+// renewed before they expire, never the key itself. Without the file: STUN only, as before.
+const turnFile = resolve(root, '..', 'build', 'cloudflare', 'turn.json');
+const ICE_TTL = 6 * 3600;
+let iceCache = { until: 0, servers: null, pending: null };
+async function iceServers() {
+  if (iceCache.servers && Date.now() < iceCache.until - 1800e3) return iceCache.servers;
+  if (iceCache.pending) return iceCache.pending;
+  let key = null;                                   // read on every miss, so a key added later is found
+  try { key = JSON.parse(readFileSync(turnFile, 'utf8')); } catch {}
+  if (!key?.id || !key?.token) return null;
+  iceCache.pending = (async () => {
+    try {
+      const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(key.id)}/credentials/generate-ice-servers`, {
+        method: 'POST', headers: { Authorization: 'Bearer ' + key.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ttl: ICE_TTL }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`);
+      const j = await r.json();
+      const servers = [].concat(j.iceServers || []).map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => !/:53\b/.test(u)) }));
+      if (!servers.length) throw new Error('no iceServers in the answer');
+      iceCache = { until: Date.now() + ICE_TTL * 1000, servers, pending: null };
+      return servers;
+    } catch (e) {
+      console.log('[ice] TURN credentials not available:', e.message);
+      if (iceCache.servers && Date.now() < iceCache.until) return iceCache.servers;   // keep the old ones to the end
+      return null;
+    } finally { iceCache.pending = null; }
+  })();
+  return iceCache.pending;
+}
+async function ice(req, res) {
+  if (foreignOrigin(req)) { res.writeHead(403).end(); return; }
+  const servers = await iceServers();
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'private, max-age=600', 'Cross-Origin-Resource-Policy': 'same-origin' });
+  res.end(JSON.stringify({ iceServers: servers || [], turn: !!servers }));
+}
+
+
 // served on every response
 const SECURITY_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin' };
 // never served even though they sit in web/: the server's own modules and dotfiles
@@ -193,6 +236,7 @@ const server = createServer((req, res) => {
   if (url.pathname === '/__stats') { if (statsAllowed(req, res)) analytics.handleStats(req, res, roomStats); return; }
   if (req.method === 'POST' && url.pathname === '/__log') { clientLog(req, res); return; }
   if (url.pathname === '/__live') { live(res); return; }
+  if (url.pathname === '/__ice') { ice(req, res); return; }
   if (url.pathname.startsWith('/__push/')) {
     if (req.method === 'POST' && foreignOrigin(req)) { res.writeHead(403).end(); req.resume(); return; }
     push.handle(req, res, url.pathname.slice(1)); return;

@@ -17,6 +17,9 @@
 //      (different builds desync in a race). Names: see cleanName().
 //   -> {t:'attach', token}                (a second socket, from the page's network worker: from
 //                                         then on this member's binary packets use that socket)
+//   -> {t:'resume', token}                <- {t:'welcome', resumed: true, ...} | {t:'error', code: 'resume'}
+//      (a new socket after the old one dropped: a member keeps its place in the room for
+//      LIMIT.graceMs, and the others are not told it was gone; the token is replaced)
 //   -> {t:'leave'}
 //   <- {t:'join', id, name} / {t:'leave', id}
 //   -> {t:'state', state}                 <- {t:'state', id, state}       ('lobby' | 'game')
@@ -51,6 +54,12 @@ function logPlay(name, secs) {
   if (!playLog || secs < 20) return;
   try { appendFileSync(join(playLog, `play-${new Date().toISOString().slice(0, 7)}.jsonl`), JSON.stringify({ t: Date.now(), n: name, s: Math.round(secs) }) + '\n'); } catch {}
 }
+// room members' connections: why each one closed, resumes, places given up (net-*.jsonl next
+// to the play log), to tell a player's network from this server when someone was cut off
+function logNet(o) {
+  if (!playLog) return;
+  try { appendFileSync(join(playLog, `net-${new Date().toISOString().slice(0, 7)}.jsonl`), JSON.stringify({ t: Date.now(), ...o }) + '\n'); } catch {}
+}
 const onRoom = new Set();          // listeners for new listed rooms (push notifications)
 export const onRoomCreated = (f) => onRoom.add(f);
 const tokens = new Map();          // token -> Client, for the network worker's socket
@@ -66,6 +75,7 @@ export const LIMIT = {               // (exported for tests)
   textBurst: 200, textPerSec: 50,   // JSON messages (pings are 0.5/s; WebRTC signalling comes in bursts)
   badPasswords: 10,       // wrong room passwords before the socket is closed
   idleMs: 90e3,           // no data at all (our pings are answered with pongs) -> closed
+  graceMs: 20e3,          // a member whose socket dropped keeps its place this long (net.js resumes)
 };
 let clientCount = 0;
 const perIp = new Map();
@@ -129,7 +139,8 @@ class Client {
   constructor(sendText, sendBin, close, label) {
     this.sendText = sendText; this.sendBin = sendBin; this.close = close; this.label = label;
     this.id = null; this.room = null; this.name = ''; this.rtt = null; this.state = 'lobby';
-    this.token = null; this.gameSince = 0; this.bin = null; this.binFor = null;
+    this.token = null; this.gameSince = 0; this.bin = null; this.binFor = null; this.binClient = null;
+    this.awayTimer = null; this.opened = Date.now();
     this.bucket = LIMIT.textBurst; this.bucketT = Date.now(); this.badPw = 0;
   }
   // false when the client sends JSON faster than LIMIT allows (far over: the socket is closed)
@@ -137,7 +148,7 @@ class Client {
     const now = Date.now();
     this.bucket = Math.min(LIMIT.textBurst, this.bucket + (now - this.bucketT) / 1000 * LIMIT.textPerSec); this.bucketT = now;
     if (--this.bucket >= 0) return true;
-    if (this.bucket < -LIMIT.textBurst) this.close();
+    if (this.bucket < -LIMIT.textBurst) this.close('sent too many messages');
     return false;
   }
   send(b) { (this.bin || this.sendBin)(b); }
@@ -184,7 +195,7 @@ class Client {
       if (room.pass) {
         const given = hashPw(room.salt, clean(m.password, 64));
         if (!timingSafeEqual(given, room.pass)) {
-          if (m.password && ++this.badPw >= LIMIT.badPasswords) { this.fail('password', 'Too many wrong passwords.'); this.close(); return; }
+          if (m.password && ++this.badPw >= LIMIT.badPasswords) { this.fail('password', 'Too many wrong passwords.'); this.close('wrong passwords'); return; }
           return this.fail('password', m.password ? 'Wrong password.' : 'This room needs a password.');
         }
       }
@@ -195,8 +206,12 @@ class Client {
       // tokens belong to room members (page sockets), so a worker socket can't be attached to
       // another worker socket or to itself
       const owner = tokens.get(String(m.token || ''));
-      if (owner && owner !== this && !owner.binFor) { owner.bin = this.sendBin; this.binFor = owner; watchers.delete(this); this.json({ t: 'attached' }); }
+      if (owner && owner !== this && !owner.binFor) { owner.bin = this.sendBin; owner.binClient = this; this.binFor = owner; watchers.delete(this); this.json({ t: 'attached' }); }
       else this.fail('token', 'Unknown token.');
+    } else if (m.t === 'resume' && !this.id) {
+      const old = tokens.get(String(m.token || ''));
+      if (old && old !== this && old.room && !old.binFor) this.adopt(old);
+      else this.fail('resume', 'Your place in the room is gone.');
     } else if (m.t === 'state' && this.id) {
       const was = this.state;
       this.state = m.state === 'game' ? 'game' : 'lobby';
@@ -224,8 +239,36 @@ class Client {
     if (dst === BCAST) { for (const c of from.room.members.values()) if (c !== from) c.send(out); }
     else from.room.members.get(dst)?.send(out);
   }
+  // a new socket takes over a member whose old one dropped (or is about to): same id, name and
+  // place; the network worker's socket, if any, now speaks for this one
+  adopt(old) {
+    clearTimeout(old.awayTimer); old.awayTimer = null;
+    tokens.delete(old.token);
+    for (const k of ['id', 'room', 'name', 'rtt', 'state', 'gameSince', 'bin', 'binClient']) this[k] = old[k];
+    if (this.binClient) this.binClient.binFor = this;
+    this.token = randomBytes(12).toString('hex'); tokens.set(this.token, this);
+    this.room.members.set(this.id, this);
+    const away = old.awaySince ? Date.now() - old.awaySince : 0;
+    Object.assign(old, { id: null, room: null, token: null, bin: null, binClient: null });
+    old.close('replaced by a resumed connection');                 // if it was still open
+    const peers = [...this.room.members.values()].filter((c) => c !== this).map((c) => ({ id: c.id, name: c.name, state: c.state }));
+    this.json({ t: 'welcome', resumed: true, id: this.id, room: this.room.code, info: roomInfo(this.room), peers, token: this.token });
+    console.log(`[relay] ${this.label} resumed ${this.id} (${this.name}) in ${this.room.code} after ${away} ms`);
+    logNet({ ev: 'resume', id: this.id, n: this.name, room: this.room.code, away, state: this.state });
+  }
+  // the socket dropped without a goodbye: keep the place for a while, for a resume
+  away() {
+    this.awaySince = Date.now();
+    this.awayTimer = setTimeout(() => {
+      if (!this.id) return;
+      logNet({ ev: 'gone', id: this.id, n: this.name, room: this.room.code, state: this.state });
+      this.gone();
+    }, LIMIT.graceMs);
+    this.awayTimer.unref?.();
+  }
   gone() {
     if (!this.id) return;
+    clearTimeout(this.awayTimer); this.awayTimer = null;
     if (this.state === 'game' && this.gameSince) logPlay(this.name, (Date.now() - this.gameSince) / 1000);
     tokens.delete(this.token); this.token = null; this.bin = null;
     const room = this.room;
@@ -237,10 +280,20 @@ class Client {
     this.id = null; this.room = null;
     roomsChanged();
   }
-  closed() {
+  closed(why) {
     watchers.delete(this);
-    if (this.binFor) { if (this.binFor.bin === this.sendBin) this.binFor.bin = null; this.binFor = null; }   // back to the page's socket
-    this.gone();
+    if (this.binFor) {                                          // back to the page's socket
+      if (this.binFor.bin === this.sendBin) this.binFor.bin = null;
+      if (this.binFor.binClient === this) this.binFor.binClient = null;
+      this.binFor = null;
+    }
+    if (!this.id) return;
+    const secs = Math.round((Date.now() - this.opened) / 1000);
+    console.log(`[relay] ${this.id} (${this.name}) connection closed: ${why} after ${secs} s`);
+    logNet({ ev: 'close', id: this.id, n: this.name, room: this.room.code, why, secs, state: this.state });
+    // the browser closing it on purpose (the tab closed or reloaded) is a goodbye; anything else
+    // may be the network, so the place is kept for a resume
+    if (why.startsWith('closed by the browser')) this.gone(); else this.away();
   }
 }
 
@@ -262,20 +315,22 @@ export function handleUpgrade(req, socket) {
     const head = n < 126 ? Buffer.from([0x80 | op, n]) : n < 65536 ? Buffer.from([0x80 | op, 126, n >> 8, n & 255])
       : (() => { const h = Buffer.alloc(10); h[0] = 0x80 | op; h[1] = 127; h.writeBigUInt64BE(BigInt(n), 2); return h; })();
     if (socket.destroyed) return;
-    if (socket.writableLength > LIMIT.outBuffer) { socket.destroy(); return; }   // not reading: drop it
+    if (socket.writableLength > LIMIT.outBuffer) { kill('not reading (send queue full)'); return; }   // not reading: drop it
     socket.write(Buffer.concat([head, data]));
   };
-  const client = new Client((s) => frame(1, Buffer.from(s)), (b) => frame(2, b), () => socket.destroy(), ip);
+  let why = '';                                    // why the socket closed (relay log)
+  const kill = (w) => { why ||= w; socket.destroy(); };
+  const client = new Client((s) => frame(1, Buffer.from(s)), (b) => frame(2, b), (w) => kill(w || 'closed by the server'), ip);
   let acc = Buffer.alloc(0), frag = [], fragOp = 0, fragLen = 0, lastData = Date.now();
   const keepAlive = setInterval(() => {
-    if (Date.now() - lastData > LIMIT.idleMs) socket.destroy(); else frame(9, Buffer.alloc(0));
+    if (Date.now() - lastData > LIMIT.idleMs) kill(`nothing heard for ${LIMIT.idleMs / 1000} s`); else frame(9, Buffer.alloc(0));
   }, Math.min(30e3, LIMIT.idleMs / 3));
   let ended = false;
   const end = () => {
     if (ended) return;
     ended = true; clearInterval(keepAlive);
     clientCount--; const n = (perIp.get(ip) || 1) - 1; if (n > 0) perIp.set(ip, n); else perIp.delete(ip);
-    try { client.closed(); } catch (e) { console.log('[relay] close failed:', e.message); }
+    try { client.closed(why || 'connection lost'); } catch (e) { console.log('[relay] close failed:', e.message); }
   };
   socket.on('data', (d) => {
     lastData = Date.now();
@@ -286,28 +341,32 @@ export function handleUpgrade(req, socket) {
       let len = acc[1] & 127, off = 2;
       if (len === 126) { if (acc.length < 4) return; len = acc.readUInt16BE(2); off = 4; }
       else if (len === 127) { if (acc.length < 10) return; len = Number(acc.readBigUInt64BE(2)); off = 10; }
-      if (len > 1 << 20) { socket.destroy(); return; }
+      if (len > 1 << 20) { kill('message too big'); return; }
       const need = off + (masked ? 4 : 0) + len;
       if (acc.length < need) return;
       let payload = acc.subarray(off + (masked ? 4 : 0), need);
       if (masked) { const m = acc.subarray(off, off + 4); payload = Buffer.from(payload); for (let i = 0; i < payload.length; i++) payload[i] ^= m[i & 3]; }
       acc = acc.subarray(need);
-      if (op === 8) { socket.end(); return; }
+      if (op === 8) {                                   // a close frame: the code says why (1001: page closed)
+        const code = payload.length >= 2 ? payload.readUInt16BE(0) : 0;
+        why ||= `closed by the browser${code ? ` (${code})` : ''}`;
+        socket.end(); return;
+      }
       if (op === 9) { frame(10, payload); continue; }
       if (op === 10) continue;
       if (op) fragOp = op;
       frag.push(payload); fragLen += payload.length;
-      if (fragLen > LIMIT.message || frag.length > LIMIT.fragments) { socket.destroy(); return; }
+      if (fragLen > LIMIT.message || frag.length > LIMIT.fragments) { kill('message too big'); return; }
       if (!fin) continue;
       const msg = Buffer.concat(frag); const kind = fragOp; frag = []; fragLen = 0;
       // a message that breaks the handler costs that client its socket, not the server
       try { if (kind === 1) client.onText(msg.toString()); else client.onBin(msg); }
-      catch (e) { console.log(`[relay] ${ip}: message failed (${e.message}), closing`); socket.destroy(); return; }
+      catch (e) { console.log(`[relay] ${ip}: message failed (${e.message}), closing`); kill('message failed'); return; }
     }
   });
-  socket.on('end', () => socket.destroy());       // the client hung up without a close frame (upgraded sockets are half-open)
+  socket.on('end', () => { why ||= 'hung up without a close frame'; socket.destroy(); });   // upgraded sockets are half-open
   socket.on('close', end);
-  socket.on('error', end);
+  socket.on('error', (e) => { why ||= `network error ${e.code || e.message}`; end(); });
 }
 
 // --------------------------------------------------- raw TCP (native builds)
@@ -331,8 +390,9 @@ export function listenRaw(port, host = '127.0.0.1') {
         catch (e) { console.log('[relay] native message failed:', e.message); sock.destroy(); return; }
       }
     });
-    sock.on('close', () => client.closed());
-    sock.on('error', () => client.closed());
+    let done = false;
+    sock.on('close', () => { if (!done) { done = true; client.closed('connection lost'); } });
+    sock.on('error', (e) => { if (!done) { done = true; client.closed(`network error ${e.code || e.message}`); } });
   }).listen(...(isPath ? [port] : [port, host]), () => console.log(`[relay] native clients: ${isPath ? 'unix:' + port : `tcp://${host}:${port}`}`));
 }
 

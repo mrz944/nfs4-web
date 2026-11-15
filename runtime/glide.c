@@ -497,7 +497,7 @@ static void nfs4_vram_budget(void) {
 GL_(BufferSwap) {
     (void)c; (void)a;
     nfs4_vram_budget();
-    { extern void rt_stall_frame(void); rt_stall_frame(); }
+    { extern void rt_stall_frame(void), net_test_stall(void); rt_stall_frame(); net_test_stall(); }
     frame_begin();
     memcpy(cur->fog_lut, fog_lut, sizeof fog_lut);
     GFrame *f = cur; cur = NULL;

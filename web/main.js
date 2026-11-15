@@ -1156,7 +1156,7 @@ function setupOnline() {
       const r = net.rttTo(p);
       const right = el('span', {},
         el('span', { className: r != null ? pingClass(r) : 'muted', textContent: r != null ? `${Math.round(r)} ms` : '…' }),
-        el('span', { className: 'muted', textContent: ` · ${p.direct ? 'direct' : 'via server'}${p.state === 'game' ? ' · in game' : ''}` }));
+        el('span', { className: 'muted', textContent: ` · ${p.direct ? (p.turn ? 'via TURN' : 'direct') : 'via server'}${p.state === 'game' ? ' · in game' : ''}` }));
       ul.append(el('li', {}, el('span', { textContent: p.name }), right));
     }
     if (!net.peers.size) ul.append(el('li', {}, el('span', { className: 'muted', textContent: 'Waiting for friends… send them the invite link.' })));

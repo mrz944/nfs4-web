@@ -8,6 +8,9 @@
 // repeats the previous packets (see frame()), so a lost one is recovered from
 // the next message ~31 ms later, however long the round trip is.
 
+// STUN only, until the server answers /__ice (serve.mjs): with a TURN key there, TURN relays on
+// Cloudflare's edge as well, so two players behind strict routers still get a UDP link instead
+// of the relay through the server
 const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }];
 const BCAST = 'ffffffffffff';
 const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -70,14 +73,24 @@ export class Net extends EventTarget {
     this.waiting = null;         // pending create/join: { resolve, reject }
     this.build = '';             // the page's game build: rooms only take members of their own build
     this.token = null;           // lets the network worker's socket speak for us (relay.mjs attach)
-    this.useWorker = false;      // packets for relayed peers through net-worker.js (see attach())
-    this.worker = null; this.workerOn = false;
+    this.useWorker = false;      // the network worker (net-worker.js) carries the packets, see startWorker()
+    this.worker = null; this.workerOn = false; this.workerRelay = false; this.canTransfer = null;
+    this.ice = ICE; this.iceAt = 0; this.turn = false;
+  }
+  // the ICE servers for new links, refreshed now and then (the TURN credentials are short-lived)
+  fetchIce() {
+    if (Date.now() - this.iceAt < 3600e3) return;
+    this.iceAt = Date.now();
+    fetch('__ice', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
+      if (Array.isArray(j.iceServers) && j.iceServers.length) { this.ice = j.iceServers; if (j.turn && !this.turn) this.emit('log', 'TURN relays available for direct links'); this.turn = !!j.turn; }
+    }).catch(() => {});
   }
 
   // ------------------------------------------------------------- server
   // one WebSocket for the room browser and for the room we're in
   connect() {
     if (this.ws && this.ws.readyState <= 1) return this.connecting;
+    this.fetchIce();
     this.connecting = new Promise((resolve, reject) => {
       const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/net`);
       ws.binaryType = 'arraybuffer';
@@ -93,8 +106,14 @@ export class Net extends EventTarget {
       };
       ws.onerror = () => { clearTimeout(timer); reject(new Error('Could not reach the online server.')); };
       ws.onclose = () => {
+        clearTimeout(timer);
         clearInterval(this.pingTimer);
+        if (this.ws !== ws) return;
+        // in a room: reconnect and take our place back (relay.mjs keeps it for 20 s, and the
+        // others never see us leave); direct links to the others carry on meanwhile
+        if (this.id && this.token && !this.waiting) { this.reconnect(); return; }
         if (this.id) this.emit('log', 'disconnected from the online server');
+        this.lostAt = 0;
         this.dropRoom();
         this.waiting?.reject(new Error('Disconnected from the online server.')); this.waiting = null;
         this.emit('disconnected');
@@ -106,20 +125,67 @@ export class Net extends EventTarget {
     });
     return this.connecting;
   }
+  // the socket dropped while in a room: try again (quickly at first) until the server would have
+  // given our place away, then give up as before
+  reconnect() {
+    const now = Date.now();
+    if (!this.lostAt) { this.lostAt = now; this.tries = 0; this.emit('log', 'lost the connection to the online server, reconnecting'); this.emit('status'); }
+    if (now - this.lostAt > 18000) {
+      this.lostAt = 0; this.ws = null;
+      this.emit('log', 'disconnected from the online server');
+      this.dropRoom(); this.emit('disconnected'); return;
+    }
+    const wait = [100, 400, 1000, 2000][this.tries++] ?? 3000;
+    setTimeout(() => {
+      if (!this.id || !this.lostAt) return;
+      // a failed try closes, and comes back here; so does no answer (a server without resume)
+      this.connect().then(() => {
+        const ws = this.ws;
+        this.send({ t: 'resume', token: this.token });
+        clearTimeout(this.resumeTimer);
+        this.resumeTimer = setTimeout(() => { if (this.lostAt && this.ws === ws) ws.close(); }, 4000);
+      }).catch(() => {});
+    }, wait);
+  }
+  onResumed(m) {
+    clearTimeout(this.resumeTimer);
+    const away = Date.now() - this.lostAt;
+    this.lostAt = 0; this.token = m.token; this.info = m.info;
+    this.worker?.postMessage({ token: m.token });
+    // whoever came or went meanwhile (their messages to us were lost): new ones go through the
+    // relay until they call us again, gone ones are dropped
+    const now = new Map(m.peers.map((p) => [p.id, p]));
+    for (const id of [...this.peers.keys()]) if (!now.has(id)) { this.emit('log', `${this.peers.get(id).name} left`); this.closePeer(id); }
+    for (const p of m.peers) {
+      const q = this.peers.get(p.id);
+      if (q) q.state = p.state; else { this.addPeer(p.id, p.name, false, p.state); this.emit('log', `${p.name} joined the room`); }
+    }
+    if (this.state) this.send({ t: 'state', state: this.state });
+    this.emit('log', `reconnected to the online server after ${(away / 1000).toFixed(1)} s`);
+    this.emit('status');
+  }
   onMessage(m) {
     if (m.t === 'rooms') { this.rooms = m.rooms; this.emit('rooms', m.rooms); }
+    else if (m.t === 'welcome' && m.resumed) this.onResumed(m);
     else if (m.t === 'welcome') {
       this.id = m.id; this.room = m.room; this.info = m.info; this.token = m.token;
       for (const p of m.peers) this.addPeer(p.id, p.name, true, p.state);   // we are the newcomer: we call them
       this.emit('status');
       this.waiting?.resolve(m); this.waiting = null;
+    } else if (m.t === 'error' && m.code === 'resume') {
+      clearTimeout(this.resumeTimer); this.lostAt = 0; this.emit('log', 'disconnected from the online server (our place in the room was gone)');
+      this.dropRoom(); this.emit('disconnected');
     } else if (m.t === 'error') { const e = new Error(m.error); e.code = m.code; this.waiting?.reject(e); this.waiting = null; }
     else if (m.t === 'join') { this.addPeer(m.id, m.name, false); this.emit('log', `${m.name} joined the room`); this.emit('status'); }
     else if (m.t === 'leave') { const p = this.peers.get(m.id); if (p) { this.closePeer(m.id); this.emit('log', `${p.name} left`); this.emit('status'); } }
     else if (m.t === 'state') { const p = this.peers.get(m.id); if (p) { p.state = m.state; this.emit('status'); } }
     else if (m.t === 'signal') this.onSignal(m.from, m.data);
     else if (m.t === 'pong') { this.relayRtt = performance.now() - m.ts; if (this.id) this.shareRtts(); this.emit('status'); }
-    else if (m.t === 'info' && m.data?.rtt) { this.pingTable.set(m.from, m.data.rtt); if (m.data.fps) this.fpsTable.set(m.from, m.data.fps); this.emit('status'); }
+    else if (m.t === 'info' && m.data?.rtt) {
+      this.pingTable.set(m.from, m.data.rtt); if (m.data.fps) this.fpsTable.set(m.from, m.data.fps);
+      const p = this.peers.get(m.from); if (p && Number.isFinite(m.data.relay)) p.relayRtt = m.data.relay;
+      this.emit('status');
+    }
   }
   request(msg) {
     if (this.id) return Promise.reject(new Error('Already in a room.'));
@@ -131,7 +197,7 @@ export class Net extends EventTarget {
   }
   create(room, name) { return this.request({ t: 'create', room, name, build: this.build }); }
   join(code, name, password) { return this.request({ t: 'hello', room: code, name, password, mustExist: true, build: this.build }); }
-  leave() { this.send({ t: 'leave' }); this.dropRoom(); this.emit('status'); }
+  leave() { this.send({ t: 'leave' }); this.lostAt = 0; this.dropRoom(); this.emit('status'); }
   setState(state) { this.state = state; this.send({ t: 'state', state }); }
   dropRoom() {
     for (const id of [...this.peers.keys()]) this.closePeer(id);
@@ -148,7 +214,8 @@ export class Net extends EventTarget {
 
   // ------------------------------------------------------------ WebRTC
   addPeer(id, name, initiator, state = 'lobby') {
-    const p = { name, state, pc: new RTCPeerConnection({ iceServers: ICE }), dc: null, rtt: null, direct: false,
+    this.fetchIce();
+    const p = { name, state, pc: new RTCPeerConnection({ iceServers: this.ice }), dc: null, rtt: null, direct: false, turn: false,
                 tx: { seq: 0, hist: [] }, rx: { hi: null, seen: new Set(), gaps: 0, recovered: 0 },
                 ctr: { tx: 0, txRelay: 0, rx: 0, rxRelay: 0, last: 0, maxGap: 0, gaps: 0, recovered: 0 } };
     this.peers.set(id, p);
@@ -156,6 +223,7 @@ export class Net extends EventTarget {
     p.pc.onicecandidate = (e) => { if (e.candidate) this.send({ t: 'signal', to: id, data: { ice: e.candidate } }); };
     p.pc.onconnectionstatechange = () => { if (p.pc.connectionState === 'failed') this.emit('log', `no direct connection to ${name}, using the relay`); this.emit('status'); };
     const setup = (dc) => {
+      if (this.giveToWorker(id, dc)) { p.inWorker = true; return; }
       p.dc = dc; dc.binaryType = 'arraybuffer';
       dc.onopen = () => { p.direct = true; this.postPeers(); this.emit('log', `direct connection to ${name}`); this.emit('status'); };
       dc.onclose = () => { p.direct = false; this.postPeers(); this.emit('status'); };
@@ -171,7 +239,9 @@ export class Net extends EventTarget {
     p.statsTimer = setInterval(async () => {
       if (!p.direct) return;
       const stats = await p.pc.getStats();
-      stats.forEach((s) => { if (s.type === 'candidate-pair' && s.nominated && s.currentRoundTripTime != null) p.rtt = s.currentRoundTripTime * 1000; });
+      let pair = null;
+      stats.forEach((s) => { if (s.type === 'candidate-pair' && s.nominated && s.currentRoundTripTime != null) { p.rtt = s.currentRoundTripTime * 1000; pair = s; } });
+      if (pair) { const loc = stats.get(pair.localCandidateId), rem = stats.get(pair.remoteCandidateId); p.turn = loc?.candidateType === 'relay' || rem?.candidateType === 'relay'; }
       this.emit('status');
     }, 2000);
   }
@@ -201,6 +271,30 @@ export class Net extends EventTarget {
     this.queue = [];
     if (this.useWorker && this.token) this.startWorker(mod);
   }
+  // The data channels go to the worker as soon as they are made (while still fresh: a used
+  // channel can't be transferred), so every packet of the game, direct or relayed, is sent and
+  // received off this thread. Browsers without transferable channels keep them here.
+  giveToWorker(id, dc) {
+    if (!this.useWorker || this.canTransfer === false) return false;
+    const w = this.getWorker();
+    try { w.postMessage({ dc, id }, [dc]); this.canTransfer = true; return true; }
+    catch (e) { if (this.canTransfer == null) this.emit('log', `data channels stay on the page (${e.name || e.message})`); this.canTransfer = false; return false; }
+  }
+  getWorker() {
+    if (this.worker) return this.worker;
+    const w = this.worker = new Worker(new URL('net-worker.js', import.meta.url), { type: 'module' });
+    w.onmessage = (e) => {
+      const d = e.data;
+      if (d.dcOpen) { const p = this.peers.get(d.dcOpen); if (p) { p.direct = true; this.postPeers(); this.emit('log', `direct connection to ${p.name}`); this.emit('status'); } }
+      else if (d.dcClosed) { const p = this.peers.get(d.dcClosed); if (p) { p.direct = false; this.postPeers(); this.emit('status'); } }
+      else if (d.attached) { this.workerRelay = true; this.postPeers(); this.emit('log', 'network worker on: packets bypass the main thread'); }
+      else if (d.closed) { this.workerRelay = false; this.emit('log', 'network worker: relay socket closed, the page relays meanwhile'); }
+      else if (d.error) { this.workerRelay = false; this.emit('log', `network worker: relay socket refused (${d.error}), the page relays`); }
+      else if (d.stats) for (const [id, [tx, txRelay, rx, rxRelay, gaps, recovered]] of Object.entries(d.stats)) { const p = this.peers.get(id); if (p) { const c = p.ctr; c.tx += tx; c.txRelay += txRelay; c.rx += rx; c.rxRelay += rxRelay; p.rx.gaps += gaps || 0; p.rx.recovered += recovered || 0; p.rx.hi = (p.rx.hi || 0) + (rx - rxRelay); if (rx) c.last = performance.now(); } }
+    };
+    w.onerror = (e) => { this.workerRelay = false; this.emit('log', 'network worker error ' + (e.message || '')); };
+    return w;
+  }
   // The network worker (net-worker.js) takes the packets for peers without a direct link off
   // the main thread: runtime/net.c also writes every packet into a shared ring, the worker sends
   // the relayed ones over its own socket and puts incoming ones straight into the game's ring.
@@ -208,24 +302,19 @@ export class Net extends EventTarget {
   startWorker(mod) {
     const a = mod._rt_net_worker(1), dv = new DataView(mod.HEAPU8.buffer);
     const out = dv.getUint32(a, true), inn = dv.getUint32(a + 4, true);
-    const w = this.worker = new Worker(new URL('net-worker.js', import.meta.url));
-    const off = (why) => { if (this.workerOn) this.emit('log', `network worker off (${why}), packets go through the page`); this.workerOn = false; mod._rt_net_worker(0); };
-    const fallback = setTimeout(() => { if (!this.workerOn) off('no answer'); }, 4000);
-    w.onmessage = (e) => {
-      const d = e.data;
-      if (d.attached) { clearTimeout(fallback); this.workerOn = true; mod._rt_net_worker(1); this.postPeers(); this.emit('log', 'network worker on: relayed packets bypass the main thread'); }
-      else if (d.closed) off('socket closed');
-      else if (d.error) off(d.error);
-      else if (d.stats) for (const [id, [tx, rx]] of Object.entries(d.stats)) { const c = this.peers.get(id)?.ctr; if (c) { c.tx += tx; c.txRelay += tx; c.rx += rx; c.rxRelay += rx; c.last = performance.now(); } }
-    };
-    w.onerror = (e) => off('error ' + (e.message || ''));
+    const w = this.getWorker();
+    this.workerOn = true;                                            // the rings are up: the worker carries what it can
     const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/net`;
     w.postMessage({ init: { buffer: mod.HEAPU8.buffer, out, in: inn, url: wsUrl, token: this.token } });
+    this.postPeers();
   }
-  postPeers() { this.worker?.postMessage({ peers: [...this.peers].map(([id, p]) => [id, p.dc?.readyState === 'open']) }); }
+  postPeers() { this.worker?.postMessage({ peers: [...this.peers].map(([id, p]) => [id, !p.inWorker && p.dc?.readyState === 'open']) }); }
   sendTo(id, pkt) {
     const p = this.peers.get(id);
-    if (this.workerOn && p?.dc?.readyState !== 'open') return;           // the worker sends this one
+    // the worker's: its data channel, or the relay through its socket; the page relays only
+    // while the worker's socket is down
+    if (this.workerOn && p?.inWorker && (p.direct || this.workerRelay)) return;
+    if (this.workerOn && !p?.inWorker && p?.dc?.readyState !== 'open' && this.workerRelay) return;
     if (p) p.ctr.tx++;
     if (p?.dc?.readyState === 'open') { try { p.dc.send(frame(p.tx, pkt)); return; } catch {} }
     if (p) p.ctr.txRelay++;
@@ -248,14 +337,26 @@ export class Net extends EventTarget {
     mod._free(p);
   }
 
-  // round trip to a peer: measured on the direct link, else estimated through the relay
-  rttTo(p) { return p.direct && p.rtt != null ? p.rtt : this.relayRtt != null ? this.relayRtt * 2 : null; }
+  // round trip to a peer: measured on the direct link, else through the relay (our way to the
+  // server and theirs, which each member shares; ours twice until theirs is known)
+  rttTo(p) {
+    if (p.direct && p.rtt != null) return p.rtt;
+    return this.relayRtt != null ? this.relayRtt + (p.relayRtt ?? this.relayRtt) : null;
+  }
   shareRtts() {
     const rtt = {};
     for (const [id, p] of this.peers) { const r = this.rttTo(p); if (r != null) rtt[id] = Math.round(r); }
     this.pingTable.set(this.id, rtt);
     if (this.myFps) this.fpsTable.set(this.id, this.myFps);
-    if (this.peers.size) this.send({ t: 'info', data: { rtt, fps: this.myFps || undefined } });
+    if (this.peers.size) this.send({ t: 'info', data: { rtt, fps: this.myFps || undefined, relay: this.relayRtt != null ? Math.round(this.relayRtt) : undefined } });
+    // and to the game, which moves the others' cars ahead by how old their updates are (net.c)
+    const mod = this.mod;
+    if (mod?._rt_net_peer_rtt) for (const [id, r] of Object.entries(rtt)) {
+      const p = mod._malloc(13);
+      for (let i = 0; i < 12; i++) mod.HEAPU8[p + i] = id.charCodeAt(i);
+      mod.HEAPU8[p + 12] = 0;
+      mod._rt_net_peer_rtt(p, r); mod._free(p);
+    }
   }
   // The host's input counts at once, a client's after one round trip to the host,
   // so the best host is the member whose worst round trip to anyone is smallest.
@@ -287,7 +388,7 @@ export class Net extends EventTarget {
     return [...this.peers.values()].map((p) => {
       const c = p.ctr, r = this.rttTo(p);
       const lost = Math.max(0, p.rx.gaps - p.rx.recovered) - Math.max(0, c.gaps - c.recovered);
-      const line = `${p.name}: ${p.direct ? 'direct' : 'RELAY'} rtt=${r != null ? Math.round(r) : '?'} relay=${this.relayRtt != null ? Math.round(this.relayRtt) : '?'}`
+      const line = `${p.name}: ${p.direct ? (p.turn ? 'TURN' : 'direct') : 'RELAY'} rtt=${r != null ? Math.round(r) : '?'} relay=${this.relayRtt != null ? Math.round(this.relayRtt) : '?'}`
         + ` tx=${c.tx}${c.txRelay ? `(${c.txRelay} relay)` : ''} rx=${c.rx}${c.rxRelay ? `(${c.rxRelay} relay)` : ''}`
         + ` lost=${lost} recovered=${p.rx.recovered - c.recovered} maxgap=${Math.round(c.maxGap)}ms state=${p.state}`
         + (c.last && performance.now() - c.last > 1000 ? ` silent=${Math.round(performance.now() - c.last)}ms` : '');
@@ -298,7 +399,7 @@ export class Net extends EventTarget {
   summary() {
     const list = [...this.peers.values()].map((p) => {
       const r = this.rttTo(p), loss = p.rx.hi ? Math.round(100 * Math.max(0, p.rx.gaps - p.rx.recovered) / p.rx.hi) : 0;
-      return `${p.name}: ${r != null ? Math.round(r) + ' ms ' : ''}${p.direct ? 'direct' : 'relay'}${loss ? ` ${loss}% lost` : ''}`;
+      return `${p.name}: ${r != null ? Math.round(r) + ' ms ' : ''}${p.direct ? (p.turn ? 'turn' : 'direct') : 'relay'}${loss ? ` ${loss}% lost` : ''}`;
     });
     return { room: this.room, name: this.info?.name, players: this.peers.size + 1, peers: list, best: this.bestHost() };
   }

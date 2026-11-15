@@ -101,20 +101,31 @@ void net_deliver(const uint8_t src[6], const uint8_t *p, int len) {
     static double loss = -1;            /* RT_NET_LOSS=percent: drop incoming packets (testing) */
     if (loss < 0) { const char *e = getenv("RT_NET_LOSS"); loss = e ? atof(e) / 100.0 : 0; }
     if (loss > 0 && (double)rand() / RAND_MAX < loss) { stats.drop++; return; }
+    static double jitter = -1;          /* RT_NET_JITTER=ms: plus up to that much more, at random (no reordering) */
     if (net_delay < 0) {
         const char *e = getenv("RT_NET_DELAY"); net_delay = e ? atof(e) / 1000.0 : 0;
-        if (net_delay > 0) { pthread_t t; pthread_create(&t, NULL, delay_main, NULL); }
+        const char *j = getenv("RT_NET_JITTER"); jitter = j ? atof(j) / 1000.0 : 0;
+        if (net_delay > 0 || jitter > 0) { pthread_t t; pthread_create(&t, NULL, delay_main, NULL); }
     }
-    if (net_delay > 0 && len <= MAXPKT + 4) {
+    if ((net_delay > 0 || jitter > 0) && len <= MAXPKT + 4) {
         pthread_mutex_lock(&dq_mu);
         if ((dq_h + 1) % DQ != dq_t) {
-            dq[dq_h].due = tnow() + net_delay; memcpy(dq[dq_h].src, src, 6); dq[dq_h].len = (uint16_t)len; memcpy(dq[dq_h].p, p, (size_t)len);
+            dq[dq_h].due = tnow() + net_delay + jitter * rand() / RAND_MAX; memcpy(dq[dq_h].src, src, 6); dq[dq_h].len = (uint16_t)len; memcpy(dq[dq_h].p, p, (size_t)len);
             dq_h = (dq_h + 1) % DQ; pthread_cond_signal(&dq_cv);
         }
         pthread_mutex_unlock(&dq_mu);
         return;
     }
     deliver_now(src, p, len);
+}
+/* RT_NET_STALL=every_ms:ms (testing): freeze this game now and then, like a slow computer.
+ * Called once a frame (glide.c BufferSwap). */
+void net_test_stall(void) {
+    static double every = -1, len, last;
+    if (every < 0) { const char *e = getenv("RT_NET_STALL"); every = e ? atof(e) / 1000.0 : 0; len = e && strchr(e, ':') ? atof(strchr(e, ':') + 1) / 1000.0 : 0; }
+    if (every <= 0) return;
+    double now = tnow();
+    if (now - last >= every) { if (last > 0) { rt_log("net: test stall %.0f ms", len * 1000); usleep((useconds_t)(len * 1e6)); now = tnow(); } last = now; }
 }
 static void deliver_now(const uint8_t src[6], const uint8_t *p, int len) {
     uint16_t dport = (uint16_t)(p[0] << 8 | p[1]), sport = (uint16_t)(p[2] << 8 | p[3]);

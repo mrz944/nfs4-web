@@ -11,7 +11,8 @@
       ["improved", "A sturdier server and relay."],
       ["new", "Gamepads and steering wheels: press a button before Start, then choose it in Options › Controllers."],
       ["new", "iPhone and Android: touch controls (buttons, thumb stick or tilt), game files saved on iOS 18 Safari, sound with the silent switch on, and an Add to Home Screen tip for fullscreen."],
-      ["new", "Game Settings on the start page: start in fullscreen, FPS counter, intro movies, controllers, resolution cap, sharpness and volume."]
+      ["new", "Game Settings on the start page: start in fullscreen, FPS counter, intro movies, controllers, resolution cap, sharpness and volume."],
+      ["improved", "Online: a dropped connection rejoins its room within 20 seconds instead of leaving it, and direct links can go through TURN relays near each player."]
     ] },
     { "date": "2026-11-12", "items": [
       ["new", "Discord server for help, bug reports, ideas and finding races: linked in the menu and in the beta note."],
