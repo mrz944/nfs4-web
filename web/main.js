@@ -826,7 +826,7 @@ function watchPads() {
     const pads = padList();
     if (gameStarted && pads.length && !padsAtStart) { el.textContent = `${padName(pads[0])} connected: reload the page to drive with it.`; return; }
     if (gameStarted) return;
-    el.textContent = !settings.pads ? 'Gamepads and wheels are off (Game Settings).'
+    el.textContent = !settings.pads ? ''
       : pads.length ? `Controller: ${pads.map(padName).join(', ')}. Choose it in Options › Controllers.` : 'Controller or wheel? Press any button on it before Start.';
   };
   watchPads.show = show;
