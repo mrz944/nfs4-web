@@ -138,9 +138,36 @@ static uint32_t mip_bytes(int small, int large, int aspect, int fmt) {
 static uint32_t palette[256];
 static uint32_t pal_version = 1;
 
-typedef struct { uint32_t start, size; int small, large, aspect, fmt; uint32_t pal_ver; int dirty, used; } TexKey;
+typedef struct { uint32_t start, size; int small, large, aspect, fmt; uint32_t pal_ver; int dirty, used; uint32_t gone; } TexKey;
 static TexKey tkeys[GPU_MAX_TEX];
 static int ntkeys;
+/* A texture whose TMU memory another texture was downloaded over is gone: its slot is dropped
+ * (without this the cache only grew, a slot and its pixels for every texture ever seen, until
+ * the heap ran out after an hour or so of racing). A dropped slot keeps its pixels and is not
+ * handed out again for TEX_GRACE swaps, since frames already published may still draw with it. */
+#define TEX_GRACE 3
+static uint32_t swaps;
+static int ngone;
+static void tex_drop_overlapping(int slot) {
+    const TexKey *k = &tkeys[slot];
+    for (int i = 0; i < ntkeys; i++) {
+        TexKey *o = &tkeys[i];
+        if (i == slot || !o->used || !o->dirty) continue;
+        if (k->start < o->start + o->size && o->start < k->start + k->size) { o->used = 0; o->gone = swaps; ngone++; }
+    }
+}
+static void tex_sweep(void) {                                     /* free the pixels of slots dropped a while ago */
+    if (!ngone) return;
+    int left = 0;
+    gpu_tex_lock();
+    for (int i = 0; i < ntkeys; i++) {
+        GTex *t = gpu_tex(i);
+        if (tkeys[i].used || !t->rgba) continue;
+        if (swaps - tkeys[i].gone < TEX_GRACE) left++; else { free(t->rgba); t->rgba = NULL; }
+    }
+    gpu_tex_unlock();
+    ngone = left;
+}
 
 static inline uint32_t px_argb(int fmt, const uint8_t *s) {
     uint32_t p = fmt_bpp(fmt) == 2 ? (uint32_t)(s[0] | (s[1] << 8)) : s[0];
@@ -164,6 +191,7 @@ static inline uint32_t px_argb(int fmt, const uint8_t *s) {
 
 static int tex_convert(int slot) {
     TexKey *k = &tkeys[slot];
+    tex_drop_overlapping(slot);
     int w, h; lod_dims(k->large, k->aspect, &w, &h);
     int levels = k->large - k->small + 1;
     uint32_t total = 0;
@@ -194,7 +222,7 @@ static int tex_lookup(uint32_t start, int small, int large, int aspect, int fmt)
         }
     }
     int slot = -1;
-    for (int i = 0; i < ntkeys; i++) if (!tkeys[i].used) { slot = i; break; }
+    for (int i = 0; i < ntkeys; i++) if (!tkeys[i].used && swaps - tkeys[i].gone >= TEX_GRACE) { slot = i; break; }
     if (slot < 0) { if (ntkeys >= GPU_MAX_TEX) slot = 0; else slot = ntkeys++; }
     tkeys[slot] = (TexKey){ start, mip_bytes(small, large, aspect, fmt), small, large, aspect, fmt, 0, 1, 1 };
     return tex_convert(slot);
@@ -474,6 +502,7 @@ GL_(BufferSwap) {
     memcpy(cur->fog_lut, fog_lut, sizeof fog_lut);
     GFrame *f = cur; cur = NULL;
     gpu_publish(f);
+    swaps++; tex_sweep();
     return 0;
 }
 

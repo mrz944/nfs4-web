@@ -545,6 +545,8 @@ static void *thread_main(void *p) {
     ev("thread start", t->tid, t->param);
     uint32_t r = guest_call(c, t->start, 1, t->param);
     rt_log("thread %#x exited (%u)", t->tid, r);
+    rt_unwatch_thread();                    /* the game starts a thread per race: give back */
+    tls_cpu = NULL; cpu_free_thread(c);     /* its guest stack and TEB (Windows frees them too) */
     pthread_mutex_lock(&t->w.mu); t->w.signaled = 1; pthread_cond_broadcast(&t->w.cv); pthread_mutex_unlock(&t->w.mu);
     any_changed();
     return NULL;
@@ -559,6 +561,7 @@ static uint32_t k_CreateThread(CPU *c, const uint32_t *a) {
     uint32_t h = handle_new(H_THREAD, t);
     rt_log("CreateThread start=%#x param=%#x%s", t->start, t->param, t->suspended ? " (suspended)" : "");
     pthread_create(&t->th, NULL, thread_main, t);
+    pthread_detach(t->th);                  /* nothing joins it: detached, its host stack is freed on exit */
     return h;
 }
 static uint32_t k_ResumeThread(CPU *c, const uint32_t *a) {
@@ -566,7 +569,7 @@ static uint32_t k_ResumeThread(CPU *c, const uint32_t *a) {
     pthread_mutex_lock(&t->smu); int was = t->suspended; t->suspended = 0; pthread_cond_signal(&t->scv); pthread_mutex_unlock(&t->smu);
     return (uint32_t)was;
 }
-static uint32_t k_ExitThread(CPU *c, const uint32_t *a) { rt_log("ExitThread(%u)", A(0)); pthread_exit(NULL); }
+static uint32_t k_ExitThread(CPU *c, const uint32_t *a) { rt_log("ExitThread(%u)", A(0)); rt_unwatch_thread(); pthread_exit(NULL); }
 static uint32_t k_TerminateThread(CPU *c, const uint32_t *a) { rt_log("TerminateThread ignored"); return 1; }
 static uint32_t k_GetThreadPriority(CPU *c, const uint32_t *a) {
     Thread *t = handle_get(A(0), H_THREAD); return t ? (uint32_t)t->prio : 0;

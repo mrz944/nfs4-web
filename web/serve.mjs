@@ -10,12 +10,12 @@
 // tailnet only) and removes that again on exit. Plain http://<tailscale ip> is
 // not enough: browsers allow shared-memory threads and OPFS only on https/localhost.
 import { createServer } from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync, createReadStream, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { appendFileSync, createReadStream, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { handleUpgrade, listenRaw, liveSummary, onRoomCreated, roomStats, setPlayLog } from './relay.mjs';
+import { clientIp, foreignOrigin, handleUpgrade, listenRaw, liveSummary, onRoomCreated, roomStats, setPlayLog } from './relay.mjs';
 import { createPush, dailyRace } from './push.mjs';
 import { createAnalytics } from './analytics.mjs';
 
@@ -47,23 +47,63 @@ const types = {
   '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8',
 };
 
-// client logs: the page POSTs its log to /__log (see main.js); kept in build/clientlogs/
+// client logs: the page POSTs its log to /__log (see main.js); kept in build/clientlogs/.
+// Bounded: 20 MiB per session, 2 GiB in all (new sessions are dropped past that), and at
+// most 30 new sessions per address per hour.
 const logDir = resolve(root, '..', 'build', 'clientlogs');
-const LOG_CAP = 20 << 20;
+const LOG_CAP = 20 << 20, LOG_TOTAL = 2 ** 31, LOG_NEW_PER_HOUR = 30;
+let logBytes = 0;
+try { for (const f of readdirSync(logDir)) logBytes += statSync(join(logDir, f)).size; } catch {}
+const newLogs = new Map();                                  // address -> [count, hour]
+const printable = (l) => l.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '?');   // no terminal escapes from players
 function clientLog(req, res) {
   const sid = (new URL(req.url, 'http://x').searchParams.get('s') || '').replace(/[^a-z0-9-]/gi, '').slice(0, 40);
+  if (foreignOrigin(req)) { res.writeHead(403).end(); req.resume(); return; }
   let body = '';
   req.setEncoding('utf8');
   req.on('data', (d) => { body += d; if (body.length > 1 << 20) req.destroy(); });
   req.on('end', () => {
     res.writeHead(204).end();
     if (!sid || !body) return;
-    mkdirSync(logDir, { recursive: true });
-    const f = join(logDir, sid + '.log');
-    let size = 0; try { size = statSync(f).size; } catch { console.log(`[client] new session ${sid} (${req.socket.remoteAddress}) -> build/clientlogs/${sid}.log`); }
-    if (size < LOG_CAP) appendFileSync(f, body);
-    for (const l of body.split('\n')) if (/ERROR|ABORT|stall|stopped/.test(l)) console.log(`[client ${sid}] ${l.trim()}`);
+    try {
+      mkdirSync(logDir, { recursive: true });
+      const f = join(logDir, sid + '.log');
+      let size = 0; try { size = statSync(f).size; } catch {
+        const ip = clientIp(req), hour = Math.floor(Date.now() / 3600e3), n = newLogs.get(ip);
+        const count = n && n[1] === hour ? n[0] + 1 : 1;
+        if (newLogs.size > 10000) newLogs.clear();
+        newLogs.set(ip, [count, hour]);
+        if (count > LOG_NEW_PER_HOUR || logBytes > LOG_TOTAL) return;
+        console.log(`[client] new session ${sid} -> build/clientlogs/${sid}.log`);
+      }
+      if (size < LOG_CAP) { appendFileSync(f, body); logBytes += Buffer.byteLength(body); }
+      for (const l of body.split('\n')) if (/ERROR|ABORT|stall|stopped/.test(l)) console.log(`[client ${sid}] ${printable(l.trim()).slice(0, 400)}`);
+    } catch (e) { console.log('[client] log write failed:', e.message); }
   });
+}
+
+// /__stats is for the server's owner: HTTP Basic auth, any user name, the password from
+// NFS4_STATS_PASSWORD or build/stats-password (made on first start, readable only by you).
+const statsPassword = (() => {
+  if (process.env.NFS4_STATS_PASSWORD) return process.env.NFS4_STATS_PASSWORD;
+  const f = resolve(root, '..', 'build', 'stats-password');
+  try { return readFileSync(f, 'utf8').trim(); } catch {}
+  const pw = randomBytes(15).toString('base64url');
+  mkdirSync(dirname(f), { recursive: true });
+  writeFileSync(f, pw + '\n', { mode: 0o600 });
+  return pw;
+})();
+const statsFails = new Map();                               // address -> [failures, 10-minute window]
+function statsAllowed(req, res) {
+  const ip = clientIp(req), win = Math.floor(Date.now() / 600e3), f = statsFails.get(ip);
+  if (f && f[1] === win && f[0] >= 20) { res.writeHead(429, { 'Retry-After': '600' }).end('Too many attempts'); return false; }
+  const m = /^Basic (.+)$/i.exec(req.headers.authorization || '');
+  const given = m ? Buffer.from(m[1], 'base64').toString().replace(/^[^:]*:/, '') : '';
+  const a = createHash('sha256').update(given).digest(), b = createHash('sha256').update(statsPassword).digest();
+  if (m && timingSafeEqual(a, b)) return true;
+  if (m) { if (statsFails.size > 10000) statsFails.clear(); statsFails.set(ip, [f && f[1] === win ? f[0] + 1 : 1, win]); }
+  res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="NFS4 stats", charset="UTF-8"', 'Cache-Control': 'no-store' }).end('Password required');
+  return false;
 }
 
 // room log: every 5 s, each room with 2+ players (names, state, ping to this server),
@@ -135,13 +175,28 @@ function live(res) {
   res.end(JSON.stringify({ ...liveSummary(), top: topRacers(), daily: daily ? { next: daily.next(), time: daily.time } : null, build }));
 }
 
+// served on every response
+const SECURITY_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin' };
+// never served even though they sit in web/: the server's own modules and dotfiles
+const PRIVATE = (path) => /\.mjs$/i.test(path) || path.split(/[/\\]/).some((p) => p.startsWith('.'));
+const realRoots = new Map();
+const realRoot = (b) => { if (!realRoots.has(b)) realRoots.set(b, realpathSync(b)); return realRoots.get(b); };
+
 const server = createServer((req, res) => {
-  const url = new URL(req.url, 'http://x');
-  if (req.method === 'POST' && url.pathname === '/__event') { analytics.handleEvent(req, res); return; }
-  if (url.pathname === '/__stats') { analytics.handleStats(req, res, roomStats); return; }
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+  let url;
+  try { url = new URL(req.url, 'http://x'); } catch { res.writeHead(400).end('bad request'); return; }
+  if (req.method === 'POST' && url.pathname === '/__event') {
+    if (foreignOrigin(req)) { res.writeHead(403).end(); req.resume(); return; }
+    analytics.handleEvent(req, res); return;
+  }
+  if (url.pathname === '/__stats') { if (statsAllowed(req, res)) analytics.handleStats(req, res, roomStats); return; }
   if (req.method === 'POST' && url.pathname === '/__log') { clientLog(req, res); return; }
   if (url.pathname === '/__live') { live(res); return; }
-  if (url.pathname.startsWith('/__push/')) { push.handle(req, res, url.pathname.slice(1)); return; }
+  if (url.pathname.startsWith('/__push/')) {
+    if (req.method === 'POST' && foreignOrigin(req)) { res.writeHead(403).end(); req.resume(); return; }
+    push.handle(req, res, url.pathname.slice(1)); return;
+  }
   let decoded;
   try { decoded = decodeURIComponent(url.pathname); } catch { res.writeHead(400).end('invalid path'); return; }
   let path = normalize(decoded).replace(/^([/\\])+/, '');
@@ -153,9 +208,13 @@ const server = createServer((req, res) => {
   }
   if (gameDir && path.startsWith('__dev/game/')) { base = gameDir; path = path.slice('__dev/game/'.length); }
   const file = join(base, path);
-  if (!file.startsWith(base + sep)) { res.writeHead(403).end(); return; }
+  if (!file.startsWith(base + sep) || (base === root && PRIVATE(path))) { res.writeHead(404).end('not found'); return; }
   let st;
-  try { st = statSync(file); } catch { res.writeHead(404).end('not found'); return; }
+  try {
+    st = statSync(file);
+    const real = realpathSync(file);                          // a symlink must not lead out of the tree
+    if (!real.startsWith(realRoot(base) + sep)) throw new Error('outside');
+  } catch { res.writeHead(404).end('not found'); return; }
   if (st.isDirectory()) { res.writeHead(404).end(); return; }
   // the page and our own scripts: script addresses get ?v=<build> (see versioned())
   const rewrite = base === root && (path === 'index.html' || SCRIPTS.includes(path));
@@ -173,11 +232,17 @@ const server = createServer((req, res) => {
   createReadStream(file).on('error', () => res.destroy()).pipe(res);
 });
 // online play: WebSocket lobby/relay at /net (see relay.mjs)
-server.on('upgrade', (req, sock) => { if (new URL(req.url, 'http://x').pathname === '/net') handleUpgrade(req, sock); else sock.destroy(); });
+server.on('upgrade', (req, sock) => {
+  let path = ''; try { path = new URL(req.url, 'http://x').pathname; } catch {}
+  if (path === '/net') handleUpgrade(req, sock); else sock.destroy();
+});
+// last line of defence: a bug in a request handler is logged, not the end of every race
+process.on('uncaughtException', (e) => console.error('[server] uncaught error (still running):', e?.stack || e));
+process.on('unhandledRejection', (e) => console.error('[server] unhandled rejection (still running):', e?.stack || e));
 if (rawPort) listenRaw(rawPort);
 server.listen(port, '127.0.0.1', () => {
   console.log(`NFS4 web runtime: http://localhost:${port}/` + (gameDir ? `  (game folder: ${gameDir}, automatic download)` : ''));
-  console.log(`stats:            http://localhost:${port}/__stats`);
+  console.log(`stats:            http://localhost:${port}/__stats  (password: ${process.env.NFS4_STATS_PASSWORD ? '$NFS4_STATS_PASSWORD' : 'build/stats-password'})`);
   if (daily) console.log(`daily race:       ${daily.time} (server time), next ${new Date(daily.next()).toString().slice(0, 21)}; ${push.count} push subscriber(s)`);
   if (funnel && ![443, 8443, 10000].includes(tsPort)) { console.error('Funnel only works on ports 443, 8443 and 10000'); process.exit(1); }
   if (tsPort) startTailscale();

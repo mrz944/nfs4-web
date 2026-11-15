@@ -5,7 +5,7 @@
 // committed). Pushes go out when someone opens a listed room (at most one per 10 minutes)
 // and for the daily race (--daily HH:MM in serve.mjs): 10 minutes before and at the start.
 import { createCipheriv, createECDH, createPrivateKey, generateKeyPairSync, hkdfSync, randomBytes, sign } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const b64u = (b) => Buffer.from(b).toString('base64url');
@@ -23,14 +23,16 @@ export function createPush(dir, { subject = 'https://nfs4.xyz/' } = {}) {
     writeFileSync(keyFile, JSON.stringify(vapid), { mode: 0o600 });
   }
   const priv = createPrivateKey({ key: vapid.jwk, format: 'jwk' });
+  const MAX_SUBS = 20000;
   let subs = [];
-  try { subs = JSON.parse(readFileSync(subFile, 'utf8')); } catch {}
-  const save = () => writeFileSync(subFile, JSON.stringify(subs));
+  try { subs = JSON.parse(readFileSync(subFile, 'utf8')); chmodSync(subFile, 0o600); } catch {}
+  // subscriptions hold each browser's push keys: readable only by the server's user
+  const save = () => { try { writeFileSync(subFile, JSON.stringify(subs), { mode: 0o600 }); } catch (e) { console.log('[push] save failed:', e.message); } };
 
   function valid(s) {
     try {
       const u = new URL(s.endpoint);
-      return u.protocol === 'https:' && PUSH_HOSTS.test(u.hostname) && Buffer.from(s.keys.p256dh, 'base64url').length === 65 && Buffer.from(s.keys.auth, 'base64url').length === 16;
+      return u.protocol === 'https:' && PUSH_HOSTS.test(u.hostname) && !u.port && !u.username && !u.password && s.endpoint.length < 1024 && Buffer.from(s.keys.p256dh, 'base64url').length === 65 && Buffer.from(s.keys.auth, 'base64url').length === 16;
     } catch { return false; }
   }
   function jwt(aud) {
@@ -55,7 +57,7 @@ export function createPush(dir, { subject = 'https://nfs4.xyz/' } = {}) {
   async function sendOne(sub, msg) {
     const u = new URL(sub.endpoint);
     const r = await fetch(sub.endpoint, {
-      method: 'POST', body: encrypt(sub, JSON.stringify(msg)),
+      method: 'POST', body: encrypt(sub, JSON.stringify(msg)), redirect: 'error', signal: AbortSignal.timeout(15e3),
       headers: { TTL: '3600', Urgency: 'normal', 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream',
                  Authorization: `vapid t=${jwt(u.origin)}, k=${vapid.publicKey}` },
     });
@@ -64,10 +66,12 @@ export function createPush(dir, { subject = 'https://nfs4.xyz/' } = {}) {
   async function notify(msg) {
     if (!subs.length) return;
     const gone = new Set();
-    await Promise.all(subs.map(async (s) => {
-      try { const st = await sendOne(s, msg); if (st === 404 || st === 410) gone.add(s.endpoint); else if (st >= 400) console.log(`[push] ${new URL(s.endpoint).hostname}: HTTP ${st}`); }
-      catch (e) { console.log('[push] send failed:', e.message); }
-    }));
+    for (let i = 0; i < subs.length; i += 32) {                       // 32 at a time
+      await Promise.all(subs.slice(i, i + 32).map(async (s) => {
+        try { const st = await sendOne(s, msg); if (st === 404 || st === 410) gone.add(s.endpoint); else if (st >= 400) console.log(`[push] ${new URL(s.endpoint).hostname}: HTTP ${st}`); }
+        catch (e) { console.log('[push] send failed:', e.message); }
+      }));
+    }
     if (gone.size) { subs = subs.filter((s) => !gone.has(s.endpoint)); save(); }
     console.log(`[push] "${msg.title}" -> ${subs.length} subscriber(s)`);
   }
@@ -84,6 +88,7 @@ export function createPush(dir, { subject = 'https://nfs4.xyz/' } = {}) {
     readJson(req, (o) => {
       if (path === '__push/subscribe') {
         if (!o || !valid(o)) return json(400, { error: 'bad subscription' });
+        if (subs.length >= MAX_SUBS && !subs.some((s) => s.endpoint === o.endpoint)) return json(503, { error: 'full' });
         if (!subs.some((s) => s.endpoint === o.endpoint)) { subs.push({ endpoint: o.endpoint, keys: { p256dh: o.keys.p256dh, auth: o.keys.auth }, t: Date.now() }); save(); }
         return json(200, { ok: true, subscribers: subs.length });
       }

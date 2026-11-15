@@ -145,6 +145,7 @@ node web/serve.mjs 8084 --game game
 ```
 
 A CloneCD image (`.img`) can be turned into an ISO with `tools/img2iso.py in.img out.iso`.
+The server's `/__stats` page asks for a password: `NFS4_STATS_PASSWORD`, or the one written to `build/stats-password` on first start.
 How it all fits together: [ARCHITECTURE.md](ARCHITECTURE.md). Public hosting: [docs/cloudflare.md](docs/cloudflare.md).
 
 ### Native test helpers
@@ -159,6 +160,7 @@ How it all fits together: [ARCHITECTURE.md](ARCHITECTURE.md). Public hosting: [d
 | `RT_NO_DIRCACHE=1` | turn off the folder-listing cache |
 | `RT_GUARD=1` | fault on guest accesses past 512 MB, like the browser (natively they silently read zeros) |
 | `RT_NET_DELAY=ms` · `RT_FPS_LOG=1` · `RT_TICK_MS=15.6` | simulated latency · fps log · Windows-like coarse timers |
+| `tools/audiosim.sh`, then `RT_WAV=f RT_SIM_DRIFT=x build/nfs4sim game` | the browser's audio path natively, recorded to a WAV (sound card off by x, e.g. -0.0003); the log sums up the sound once a minute |
 
 Everything from NFS3 Web still applies (`RT_HEADLESS`, `RT_DUMP`, `RT_TRACE`, `RT_NET*`, `RT_PROF`, `./re`).
 

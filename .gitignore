@@ -22,3 +22,11 @@ dl/
 *.sub
 *.7z
 *.ppm
+# secrets: never commit (build/ already holds the tunnel and push keys)
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+credentials.json

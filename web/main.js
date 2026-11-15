@@ -168,7 +168,11 @@ async function importPack(base) {
         await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
       }
     }
-    if (lastErr) throw new Error(`Download failed: ${lastErr.message}. Reload to continue where it stopped.`);
+    if (lastErr) {
+      // storage refusing the files (Safari words it "unknown transient reason (e.g. out of memory)")
+      const full = /QuotaExceeded|UnknownError|NoModificationAllowed|InvalidState/.test(lastErr.name) ? ' The browser would not store the files: free some disk space, leave private browsing, or close other tabs with this page.' : '';
+      throw new Error(`Download failed: ${lastErr.message}.${full} Reload to continue where it stopped.`);
+    }
   }
   for (const d of idx.dirs || []) await subdir(d + '/');
   log(`game pack ${idx.id}: ${(fresh / MB).toFixed(0)} MB in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
@@ -416,7 +420,11 @@ function attachInput(mod, canvas) {
 
   // the game's cursor is relative (DirectInput): pointer lock gives clean deltas
   const acc = { x: 0, y: 0 };
-  canvas.addEventListener('click', () => { if (document.pointerLockElement !== canvas) canvas.requestPointerLock?.(); });
+  // (phones and tablets have no pointer lock: Android Chrome rejects the request with NotSupportedError)
+  canvas.addEventListener('click', () => {
+    if (document.pointerLockElement === canvas || !matchMedia('(any-pointer: fine)').matches) return;
+    canvas.requestPointerLock?.()?.catch?.(() => {});
+  });
   document.addEventListener('pointerlockchange', () => {
     const locked = document.pointerLockElement === canvas;
     $('hint').hidden = locked; document.body.classList.toggle('locked', locked);
@@ -951,6 +959,17 @@ function setupChangelog(prefix) {
   load().then((d) => { if ((d.days[0]?.date || '') > seen) btn.classList.add('fresh'); }).catch(() => {});
 }
 
+// One tab at a time: a second tab can't write game files the first one has open (its download
+// fails), and two games would share one set of files and saves. The lock is held until the tab
+// closes or reloads.
+function oneTab() {
+  if (!navigator.locks?.request) return Promise.resolve(true);
+  return new Promise((ok) => {
+    navigator.locks.request('nfs4-game', { ifAvailable: true }, (lock) => { ok(!!lock); return lock ? new Promise(() => {}) : undefined; })
+      .catch(() => ok(true));
+  });
+}
+
 async function init() {
   setupLogToggle();
   $('tip').textContent = TIPS[Math.floor(Math.random() * TIPS.length)];
@@ -959,8 +978,22 @@ async function init() {
   setupChangelog('nfs4.');
   log('page loaded; crossOriginIsolated =', crossOriginIsolated, '; SharedArrayBuffer =', typeof SharedArrayBuffer);
   if (!crossOriginIsolated) {
-    status('This page must be served with cross-origin isolation (COOP/COEP headers). Use web/serve.mjs.', true);
+    // the server sends COOP/COEP (serve.mjs); a browser that still isn't isolated is too old or locked down
+    status('This browser can\'t run the game: it is too old or a setting or extension blocks what the game needs (SharedArrayBuffer). Try an up-to-date Chrome, Edge, Firefox or Safari.', true);
+    track('error', { kind: 'browser', msg: 'not cross-origin isolated' });
     return;
+  }
+  // no WebGL2 (hardware acceleration off, GPU blocklisted): the game would run behind a black screen
+  let gl2 = null;
+  try { gl2 = document.createElement('canvas').getContext('webgl2'); gl2?.getExtension('WEBGL_lose_context')?.loseContext(); } catch {}
+  if (!gl2) {
+    status('This browser can\'t draw the game: WebGL2 is off or blocked. Turn on hardware (graphics) acceleration in the browser settings, restart the browser, then reload this page.', true);
+    log('no WebGL2'); track('error', { kind: 'browser', msg: 'no WebGL2' });
+    return;
+  }
+  if (!(await oneTab())) {
+    status('NFS4 is already open in another tab or window. Close that one, then reload this page.', true);
+    log('another tab has the game open'); return;
   }
   if (!navigator.storage?.getDirectory) { status('This browser has no Origin Private File System support.', true); return; }
   try { buildInfo = await (await fetch('dist/build-info.json', { cache: 'no-cache' })).json(); } catch {

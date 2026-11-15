@@ -2,6 +2,14 @@
   "game": "NFS4 High Stakes",
   "about": "What changed on nfs4.xyz, day by day. Kinds: new, improved, fixed. Days run 05:00 to 05:00 Polish time. nfs3-webgl's tools/discord/changelog.mjs posts them to Discord.",
   "days": [
+    { "date": "2026-11-15", "items": [
+      ["fixed", "Crackling, robotic sound in the browser: the sound now follows your speakers' pace."],
+      ["fixed", "Running out of memory after long sessions: textures the game replaces are now freed."],
+      ["fixed", "Running out of memory after many races: finished game threads give their memory back."],
+      ["improved", "A clear message when the browser can't draw the game (WebGL2 off) or is too old, before anything downloads."],
+      ["improved", "The game runs in one tab at a time, and phones no longer ask to capture the mouse."],
+      ["improved", "A sturdier server and relay."]
+    ] },
     { "date": "2026-11-12", "items": [
       ["new", "Discord server for help, bug reports, ideas and finding races: linked in the menu and in the beta note."],
       ["new", "What's New: this list of changes, day by day."]

@@ -53,10 +53,12 @@ const char *thunk_name(uint32_t addr);
 /* host -> guest call; restores esp afterwards so stdcall/cdecl both work */
 uint32_t guest_call(CPU *c, uint32_t fn, int n, ...);
 CPU *cpu_new_thread(uint32_t stack_size);
+void cpu_free_thread(CPU *c);         /* a finished guest thread: its stack, TEB and CPU */
 void guest_backtrace(CPU *c);  /* fresh CPU with stack + TEB */
 extern __thread CPU *tls_cpu;
 extern __thread const char *tls_thunk_name;  /* host function currently executing */
 void rt_watch_thread(uint32_t tid);   /* register the calling guest thread with the watchdog */
+void rt_unwatch_thread(void);         /* the calling thread is about to exit */
 void rt_watch_dump(const char *why);
 uint32_t rt_caller(void);              /* guest return address of the API call in progress */   /* log what every guest thread is doing */
 

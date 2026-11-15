@@ -33,14 +33,23 @@ static DSBuf bufs[MAX_BUF];
 static int nbufs;
 static pthread_mutex_t ds_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+/* The sound clock. In the browser it's the wall clock minus a skew that web_audio_main()
+ * slowly adjusts so the clock keeps the pace the speakers really play at: the sound card's
+ * clock and the computer's differ by a few samples a second, which over ~15 minutes filled
+ * (or emptied) the output buffer, and the audio crackled from then on. */
+static int64_t clock_skew_ns;
+static unsigned resyncs, resync_worst_ms;   /* mixer jumps to the game's position (an audible glitch each) */
+static uint64_t now_ns(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec - (uint64_t)__atomic_load_n(&clock_skew_ns, __ATOMIC_RELAXED);
+}
 static DSBuf *buf_of(uint32_t obj) { uint32_t i = RD32(obj + 4); return i < (uint32_t)nbufs ? &bufs[i] : NULL; }
 
 /* Native builds report the position the sound card has mixed up to. In the browser the mixer
  * thread can be starved for seconds (Safari), and the intro movie and music streaming poll this
  * position in a tight loop, so there play positions run on wall time like a real sound card and
  * the mixer follows them (snd_output_mix resyncs), never the other way round. */
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(RT_WEBAUDIO_SIM)
 #define POS_FROM_MIXER 0
 #else
 #define POS_FROM_MIXER g_audio_on
@@ -194,7 +203,7 @@ void snd_output_mix(int16_t *out, int frames) {
         double g = db_gain(b->volume);
         double gl = g * (b->pan > 0 ? db_gain(-b->pan) : 1.0), gr = g * (b->pan < 0 ? db_gain(b->pan) : 1.0);
         double p = b->mpos;
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(RT_WEBAUDIO_SIM)
         /* keep fixed-rate buffers (movie sound, music streams) on the clock the game sees (it
          * fills them relative to that position); jump only when more than 60 ms apart */
         if (b->freq == b->rate || !b->freq) {
@@ -202,8 +211,15 @@ void snd_output_mix(int16_t *out, int frames) {
             if (b->looping || bytes < b->size) {
                 double target = (double)(bytes / b->block);
                 double d = p - target;
-                if (b->looping) { d = fmod(d, (double)nframes); if (d > nframes / 2.0) d -= nframes; if (d < -nframes / 2.0) d += nframes; }
-                if (fabs(d) > 0.06 * b->rate) p = b->looping ? fmod(target, (double)nframes) : target < nframes ? target : nframes - 1;
+                if (b->looping) {   /* the shorter way round the loop (nframes is unsigned: -nframes would wrap) */
+                    double n = (double)nframes;
+                    d = fmod(d, n); if (d > n / 2.0) d -= n; if (d < -n / 2.0) d += n;
+                }
+                if (fabs(d) > 0.06 * b->rate) {
+                    p = b->looping ? fmod(target, (double)nframes) : target < nframes ? target : nframes - 1;
+                    resyncs++; unsigned ms = (unsigned)(fabs(d) * 1000.0 / b->rate); if (ms > resync_worst_ms) resync_worst_ms = ms;
+                    { static int nlog; if (getenv("RT_RESYNC_LOG") && nlog++ < 40) rt_log("resync buf %d: size %u loop %d rate %u freq %u d %.0f frames (p %.0f target %.0f, nframes %u)", i, b->size, b->looping, b->rate, b->freq, d, b->mpos, target, nframes); }
+                }
             }
         }
 #endif
@@ -240,15 +256,42 @@ void snd_output_mix(int16_t *out, int frames) {
     }
 }
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(RT_WEBAUDIO_SIM)
 /* Browser: a producer thread keeps a ring of interleaved s16 stereo filled
  * ~90 ms ahead; the page's AudioWorklet (web/audio-worklet.js) drains it. */
-#include <emscripten.h>
 #include <unistd.h>
 #define WEB_AUDIO_CAP 16384u                     /* frames, power of two */
 typedef struct { volatile uint32_t rd, wr; uint32_t cap, rate; int16_t data[2 * WEB_AUDIO_CAP]; } WebAudio;
 static WebAudio web_audio = {0, 0, WEB_AUDIO_CAP, OUT_RATE};
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
 EMSCRIPTEN_KEEPALIVE void *rt_web_audio(void) { return &web_audio; }
+#else
+/* RT_WEBAUDIO_SIM (a native test build): this thread plays the AudioWorklet's part, draining
+ * 128 frames per quantum at 44.1 kHz x (1 + RT_SIM_DRIFT) and appending them to RT_WAV */
+static void *sim_worklet(void *unused) {
+    (void)unused;
+    double drift = getenv("RT_SIM_DRIFT") ? atof(getenv("RT_SIM_DRIFT")) : 0;
+    FILE *w = getenv("RT_WAV") ? fopen(getenv("RT_WAV"), "wb") : NULL;
+    if (w) { static const uint8_t hdr[44] = { 'R','I','F','F',0xff,0xff,0xff,0x7f,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
+              0x44,0xac,0,0,0x10,0xb1,2,0,4,0,16,0,'d','a','t','a',0xff,0xff,0xff,0x7f }; fwrite(hdr, 1, 44, w); }
+    struct timespec next; clock_gettime(CLOCK_MONOTONIC, &next);
+    double q = 128.0 / (OUT_RATE * (1.0 + drift));
+    for (;;) {
+        long ns = next.tv_nsec + (long)(q * 1e9); next.tv_sec += ns / 1000000000; next.tv_nsec = ns % 1000000000;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        uint32_t rd = __atomic_load_n(&web_audio.rd, __ATOMIC_ACQUIRE), rd0 = rd, wr = __atomic_load_n(&web_audio.wr, __ATOMIC_ACQUIRE);
+        int16_t out[256];
+        for (int i = 0; i < 128; i++) {
+            if (rd == wr) { out[2 * i] = out[2 * i + 1] = 0; continue; }
+            uint32_t j = rd & (WEB_AUDIO_CAP - 1); out[2 * i] = web_audio.data[2 * j]; out[2 * i + 1] = web_audio.data[2 * j + 1]; rd++;
+        }
+        __atomic_compare_exchange_n(&web_audio.rd, &rd0, rd, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        if (w) fwrite(out, 4, 128, w);
+    }
+    return NULL;
+}
+#endif
 /* The game's play positions run on wall time (play_pos), so nothing here can hold the game up.
  * This thread keeps the ring ~90 ms ahead of the speakers. If the page isn't draining it
  * (AudioContext suspended by the autoplay policy, worklet not loaded) it still mixes at wall
@@ -258,9 +301,22 @@ EMSCRIPTEN_KEEPALIVE void *rt_web_audio(void) { return &web_audio; }
 static void *web_audio_main(void *unused) {
     (void)unused;
     int16_t tmp[2 * 512];
-    uint64_t t0 = now_ns(), mixed = 0, late_max = 0, last = t0, stat_t = t0; unsigned drops = 0, lates = 0;
+    uint64_t t0 = now_ns(), mixed = 0, late_max = 0, last = t0, stat_t = t0, rd_t = t0; unsigned drops = 0, lates = 0;
+    uint32_t last_rd = 0; int64_t skew0 = 0, skew_min = 0; uint32_t lv_min = UINT32_MAX, lv_max = 0; unsigned drops_min = 0;
     for (;;) {
         uint64_t t = now_ns();
+        {   /* keep the sound clock on the speakers' pace (only while they really play) */
+            uint32_t rd = __atomic_load_n(&web_audio.rd, __ATOMIC_ACQUIRE), level = web_audio.wr - rd;
+            if (rd != last_rd) { last_rd = rd; rd_t = t; }
+            if (level < lv_min) lv_min = level; if (level > lv_max) lv_max = level;
+            uint64_t due_now = (t - t0) * OUT_RATE / 1000000000ull;
+            if (t - rd_t < 50000000ull) {
+                int64_t step = 0;
+                if (level > WEB_AHEAD + 1536) step = 2000;                         /* clock ahead of the speakers: slow it 0.1% */
+                else if (mixed > due_now + WEB_AHEAD + 1024) step = -2000;          /* speakers ahead of the clock (past the buffer they keep full): speed it up */
+                if (step) { __atomic_add_fetch(&clock_skew_ns, step, __ATOMIC_RELAXED); t -= (uint64_t)step; }
+            }
+        }
         if (t - last > late_max) late_max = t - last;
         if (t - last > 50000000ull) lates++;
         last = t;
@@ -283,7 +339,14 @@ static void *web_audio_main(void *unused) {
         }
         if (t - stat_t > 10000000000ull) {                             /* every 10 s, only if something was off */
             if (lates || drops) rt_log("audio: thread woke late %u times (worst %.0f ms), %u drops of 512 frames (output not draining)", lates, late_max / 1e6, drops);
-            lates = drops = 0; late_max = 0; stat_t = t;
+            int64_t sk = __atomic_load_n(&clock_skew_ns, __ATOMIC_RELAXED);
+            if (sk - skew0 > 2000000 || skew0 - sk > 2000000) rt_log("audio: sound clock %+.3f%% against the wall clock (speaker pace)", (double)(sk - skew0) / (double)(t - stat_t) * -100.0);
+            skew0 = sk; drops_min += drops; lates = drops = 0; late_max = 0; stat_t = t;
+            static int tick; if (++tick % 6 == 0) {                    /* once a minute: how the sound went */
+                rt_log("audio: last minute: buffer %u..%u frames, clock %+.3f%%, %u drops, %u resyncs (worst %u ms)",
+                       lv_min == UINT32_MAX ? 0 : lv_min, lv_max, (double)(sk - skew_min) / 60e9 * -100.0, drops_min, resyncs, resync_worst_ms);
+                lv_min = UINT32_MAX; lv_max = 0; skew_min = sk; drops_min = 0; resyncs = 0; resync_worst_ms = 0;
+            }
         }
         usleep(2000);
     }
@@ -296,6 +359,9 @@ static void audio_open(void) {
     g_audio_on = 1;
     pthread_mutex_unlock(&ds_mu);
     pthread_t t; pthread_create(&t, NULL, web_audio_main, NULL);
+#ifndef __EMSCRIPTEN__
+    pthread_create(&t, NULL, sim_worklet, NULL);
+#endif
     rt_log("audio: web ring %u Hz", OUT_RATE);
 }
 #elif !defined(RT_NO_SDL)

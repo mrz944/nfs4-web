@@ -46,7 +46,7 @@ export function createAnalytics(dir) {
       }
       const rec = { t: Date.now(), e: e.e, v: visitor(req), s: String(e.s || '').slice(0, 40), d: data };
       if (e.e === 'view') Object.assign(rec.d, browserOf(req.headers['user-agent']));
-      appendFileSync(fileFor(), JSON.stringify(rec) + '\n');
+      try { appendFileSync(fileFor(), JSON.stringify(rec) + '\n'); } catch (err) { console.log('[analytics] write failed:', err.message); }
     });
   }
 

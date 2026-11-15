@@ -224,7 +224,7 @@ static void *relay_rx(void *unused) {
     (void)unused;
     static uint8_t body[1 << 16];
     for (;;) {
-        uint32_t n; if (read_full(relay_fd, &n, 4) || n < 1 || n > sizeof body) break;
+        uint32_t n; if (read_full(relay_fd, &n, 4) || n < 1 || n >= sizeof body) break;   /* room for the 0 below */
         if (read_full(relay_fd, body, n)) break;
         if (body[0] == 1) { if (n > 7) net_deliver(body + 1, body + 7, (int)n - 7); continue; }
         body[n] = 0;

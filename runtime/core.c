@@ -33,15 +33,28 @@ __thread const char *tls_thunk_name;
 /* watchdog (rt_watch_*): what every guest thread is doing, readable from another thread */
 static __thread volatile uint32_t tls_calls, tls_ret;
 static __thread const char *volatile tls_last;
-typedef struct { uint32_t tid; CPU *const volatile *cpu; const char *const volatile *in; const char *const volatile *last; volatile uint32_t *calls, *ret; uint32_t seen; } Watch;
+typedef struct { uint32_t tid; CPU *const volatile *cpu; const char *const volatile *in; const char *const volatile *last; volatile uint32_t *calls, *ret; uint32_t seen; int used; } Watch;
+/* slots point into each thread's thread-locals: a thread leaves (rt_unwatch_thread) before it
+ * exits, and watch_mu keeps it from leaving while a dump reads them */
 static Watch watch[64]; static int nwatch;
+static pthread_mutex_t watch_mu = PTHREAD_MUTEX_INITIALIZER;
 uint32_t rt_caller(void) { return tls_ret; }   /* guest address of the current API call */
 void guest_backtrace(CPU *c);
 static __thread uint32_t tls_tid;
 void rt_watch_thread(uint32_t tid) {
     tls_tid = tid;
-    int i = __atomic_fetch_add(&nwatch, 1, __ATOMIC_SEQ_CST);
-    if (i < 64) watch[i] = (Watch){ tid, (CPU *const volatile *)&tls_cpu, (const char *const volatile *)&tls_thunk_name, &tls_last, &tls_calls, &tls_ret, 0 };
+    pthread_mutex_lock(&watch_mu);
+    int i = 0; while (i < nwatch && watch[i].used) i++;
+    if (i < 64) {
+        watch[i] = (Watch){ tid, (CPU *const volatile *)&tls_cpu, (const char *const volatile *)&tls_thunk_name, &tls_last, &tls_calls, &tls_ret, 0, 1 };
+        if (i == nwatch) nwatch++;
+    }
+    pthread_mutex_unlock(&watch_mu);
+}
+void rt_unwatch_thread(void) {
+    pthread_mutex_lock(&watch_mu);
+    for (int i = 0; i < nwatch; i++) if (watch[i].used && watch[i].cpu == (CPU *const volatile *)&tls_cpu) watch[i].used = 0;
+    pthread_mutex_unlock(&watch_mu);
 }
 void bgl_dump(void);
 void rt_watch_dump(const char *why) {
@@ -57,14 +70,16 @@ void rt_watch_dump(const char *why) {
         pk += used; if (*pk == ',') pk++;
     }
     rt_log("threads (%s):", why);
-    int n = nwatch < 64 ? nwatch : 64;
-    for (int i = 0; i < n; i++) {
+    pthread_mutex_lock(&watch_mu);
+    for (int i = 0; i < nwatch; i++) {
         Watch *w = &watch[i];
+        if (!w->used) continue;
         uint32_t calls = *w->calls, d = calls - w->seen; w->seen = calls;
         const char *in = *w->in, *last = *w->last;
         rt_log("  thread %#x: %s %s, from %#x, %u calls since last look", w->tid, in ? "in" : "running guest code, last call", in ? in : last ? last : "-", *w->ret, d);
         if (*w->cpu) guest_backtrace(*w->cpu);
     }
+    pthread_mutex_unlock(&watch_mu);
 }
 __thread uint32_t tls_lasterr;
 char g_game_dir[1024];
@@ -446,24 +461,33 @@ uint32_t guest_call(CPU *c, uint32_t fn, int n, ...) {
 
 /* ----------------------------------------------------------- CPU / TEB */
 
-static void cpu_init(CPU *c, uint32_t stack_top) {
+static uint32_t cpu_init(CPU *c, uint32_t stack_top) {   /* returns the TEB block, for gfree */
     memset(c, 0, sizeof *c);
     c->r[ESP] = stack_top;
     c->fcw = 0x27F;
-    c->fs_base = (galloc(0x2000) + 0xFFF) & ~0xFFFu;     /* one TEB page per thread, from the guest heap */
+    uint32_t teb = galloc(0x2000);
+    c->fs_base = (teb + 0xFFF) & ~0xFFFu;     /* one TEB page per thread, from the guest heap */
     WR32(c->fs_base + 0x00, 0xFFFFFFFFu);  /* SEH chain end */
     WR32(c->fs_base + 0x04, stack_top);
     WR32(c->fs_base + 0x08, stack_top - 0x100000);
     WR32(c->fs_base + 0x18, c->fs_base);   /* self */
     c->seg[0] = c->seg[2] = c->seg[3] = 0x23; c->seg[1] = 0x1B; c->seg[4] = 0x3B;
+    return teb;
 }
+/* a guest thread's CPU with the guest memory it owns (stack, TEB), freed together when it ends */
+typedef struct { CPU c; uint32_t stack, teb; } ThreadCPU;
 CPU *cpu_new_thread(uint32_t stack_size) {
     if (stack_size < 0x40000) stack_size = 0x40000;
     uint32_t base = galloc(stack_size);
     if (!base) rt_fatal("no memory for thread stack");
-    CPU *c = calloc(1, sizeof *c);
-    cpu_init(c, (base + stack_size - 64) & ~15u);
-    return c;
+    ThreadCPU *t = calloc(1, sizeof *t);
+    t->teb = cpu_init(&t->c, (base + stack_size - 64) & ~15u);
+    t->stack = base;
+    return &t->c;
+}
+void cpu_free_thread(CPU *c) {
+    ThreadCPU *t = (ThreadCPU *)c;
+    gfree(t->stack); gfree(t->teb); free(t);
 }
 
 /* ---------------------------------------------------------- CPU helpers */
