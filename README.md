@@ -38,6 +38,8 @@ It's the same approach as [NFS3 Web](https://github.com/mrz944/nfs3-web); most o
 - 🎮 **Voodoo2 on your GPU.** The game's Glide 3 path is drawn with WebGL 2, in sharp 4:3 modes up to 2880x2160.
 - 🌐 **Online in the browser.** Up to 8 racers per room, direct browser-to-browser links (WebRTC)
   with a relay fallback, a room browser, passwords and invite links.
+- 🏁 **Lap records with replays.** Every racer's best lap per track, under a name that's theirs
+  (a passphrase, no account), with the game's own replay of that race.
 - 🔒 **Your copy stays yours.** The site hosts no game files. You pick your NFS4 folder once; it's
   copied into the browser's private storage (OPFS) and never uploaded.
 
@@ -148,7 +150,25 @@ node web/serve.mjs 8084 --game game
 
 A CloneCD image (`.img`) can be turned into an ISO with `tools/img2iso.py in.img out.iso`.
 With a Cloudflare TURN key in `build/cloudflare/turn.json` (`{"id": …, "token": …}`, check it with `node tools/turn-check.mjs`), `/__ice` hands the page short-lived TURN credentials for players whose direct links fail.
+The server keeps its data in `build/` on your machine (`--data DIR` moves it, for test servers):
+
+| Folder | What's in it |
+|---|---|
+| `clientlogs/` | page logs per session, room logs |
+| `analytics/` | cookie-free analytics and play time, summary at `/__stats` |
+| `laps/` · `replays/` | lap records · their replays (gzipped) |
+| `players/` | players (hashed passphrases, names) and which sessions were whose |
+| `push/` | Web Push keys and subscriptions |
+| `cloudflare/turn.json` | the optional TURN key |
+
 The server's `/__stats` page asks for a password: `NFS4_STATS_PASSWORD`, or the one written to `build/stats-password` on first start.
+Its Players section looks up one player; `node tools/players.mjs` (`who`, `list`, `give`, `rename`, `forget`) does the same from the terminal.
+
+**Lap records, names and replays.** The start page keeps every racer's best lap on each track, in both directions, tagged for mirrored, night and weather.
+Each browser gets a player key, 8 words that are never shown unless you ask; the server stores only a hash of them.
+The key owns your name, so your laps go with it, and the same 8 words on another device make you the same racer there (*Online Play › Your name › Use on another device*).
+After every race that isn't online, the game's own replay of it (`replay.rp4`) goes up with the laps, and **▶ replay** on a best lap puts it into your game under *Load › Replays*.
+`?icetest` in the page URL logs what each STUN and TURN server gives this browser, for players whose online links never come up.
 How it all fits together: [ARCHITECTURE.md](ARCHITECTURE.md). Public hosting: [docs/cloudflare.md](docs/cloudflare.md).
 
 ### Native test helpers
@@ -165,6 +185,7 @@ How it all fits together: [ARCHITECTURE.md](ARCHITECTURE.md). Public hosting: [d
 | `RT_NET_DELAY=ms` · `RT_FPS_LOG=1` · `RT_TICK_MS=15.6` | simulated latency · fps log · Windows-like coarse timers |
 | `RT_NET_JITTER=ms` · `RT_NET_STALL=every_ms:ms` | random extra latency (no reordering) · freeze the game now and then, like a slow computer |
 | `RT_FAKEPAD=1` · `JOY@axis;v`, `JOYB@n` in `RT_INPUT` | a test controller at start · move its axes, press its buttons |
+| `RT_AUTOPILOT=1` | the game's AI drives your car, so a scripted race finishes with real laps (`game: lap …` in the log) |
 | `tools/audiosim.sh`, then `RT_WAV=f RT_SIM_DRIFT=x build/nfs4sim game` | the browser's audio path natively, recorded to a WAV (sound card off by x, e.g. -0.0003); the log sums up the sound once a minute |
 
 Everything from NFS3 Web still applies (`RT_HEADLESS`, `RT_DUMP`, `RT_TRACE`, `RT_NET*`, `RT_PROF`, `./re`).

@@ -89,12 +89,60 @@ OPFS folder costs ~30 ms, and the front end probes ~180 showcase files that don'
 cached and re-read only after the runtime itself creates, deletes or renames something in that
 folder (`fs_changed`). Opening a file known to be missing makes no host call. `RT_NO_DIRCACHE=1` turns the cache off.
 
+The runtime keeps the current folder (`SetCurrentDirectoryA`), as in NFS3 Web: relative paths in
+the file calls start there, DLLs and INI files from the game folder. NFS4 itself builds full save
+paths (`%sSaves\*.%s`) and hasn't been seen changing folders.
+
 ## Online (IPX)
 
 Unchanged runtime (`runtime/net.c`, `web/relay.mjs`, `web/net.js`). Observed with
 `RT_NET_TRACE`: game discovery is a 4-byte SAP query broadcast to socket `0x452` from socket
 `0x4001`. In a race both sides send 32 packets/s. The host's Game dialog chooses topology
 (Peer-to-Peer / Client/Server) and netcode (Positional / Controller updates); see README.
+
+A link that fails or isn't up after 20 s logs what ICE had (candidate types per side, how the
+pairs ended, TURN errors; never addresses), and every link logs the path it took. Joining waits
+up to 2 s for the TURN servers. `?icetest` probes each STUN and TURN server on its own.
+
+## Players (web/players.mjs)
+
+Players without accounts, the same as in NFS3 Web. Every browser makes a player key: 8 words from
+the EFF short word list (`web/words.js`), kept in its storage. The server gets only a hash of the
+words (`SHA-256("nfs4 player v1:" + words)`, hashed again), and gives the player a random public
+id. The same words on another device are the same player there (*Your Passphrase*).
+
+- A name belongs to one player: compared without case or look-alike digits, held for 7 days
+  after a change, 3 changes a day. The relay refuses a name another player owns.
+- Lap records and the most active racers are one row per player, under the current name.
+- Analytics events, play and connection logs, room logs and session logs carry the player id.
+  `/__stats` has a Players section with a lookup; `tools/players.mjs` does the same from the
+  terminal and fixes names and laps by hand.
+
+## Lap records (runtime/game.c, web/laps.mjs, web/replays.mjs)
+
+Found with `RT_INPUT=…,MEMDUMP` dumps during native races: the AI cars' lap times stepped from 0
+to about 100 s worth of 1/64 s ticks at fixed places 0xad4 bytes apart, and the code that copies
+those records led to their pointer table.
+
+- Cars: pointers at `0x661a88` to records of 0xad4 bytes. In a record: `+0x1dc` the car's folder
+  code (`P911`), `+0x1ec` the human's number (-1 the AI), `+0x1f8` 5 human / 11 AI, plus 0x200
+  when another machine drives the car, `+0x22c` laps finished, `+0x238` each lap's time
+  (1/64 s, up to 16 laps).
+- The local player's car: a human's car no other machine drives. Online every machine has every
+  human's car with the same numbers (host 0, client 1), so `+0x1ec` alone doesn't say whose.
+- Race settings: the game's settings block at `0x7c3c04` (the copy its code reads; others sit at
+  `0x7421b0`, `0x8295ec`, `0x853b9c`). Found by toggling each Location option between dumps:
+  track `+0x10e0` (an index into the track folder table at `0x5ba21c`: 0 Hills = Celtic Ruins,
+  … 18 Empire City), laps `+0x10e8`, backward `+0x10ec`, mirrored `+0x10f0`, night `+0x10f4`,
+  weather `+0x10f8`.
+- Replays: at the end of every offline race the game writes `SaveData\replay.rp4`, which starts
+  with a copy of that settings block (0x18a4 bytes, its first word). Load › Replays lists
+  `SaveData\Saves\*.rp4`. The page uploads `replay.rp4` after a race whose laps it sent, and
+  puts a record's replay into `savedata/Saves`.
+- Checked natively with `RT_AUTOPILOT=1` (the game's AI drives the player's car): laps, track
+  and all four flags offline, and online with two instances. An autopilot race's replay has no
+  recording (the human control routine records the player's car), so playing a real replay back
+  needs a human-driven race.
 
 ## Notes for scripted tests
 
