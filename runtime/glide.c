@@ -498,6 +498,7 @@ GL_(BufferSwap) {
     (void)c; (void)a;
     nfs4_vram_budget();
     { extern void rt_stall_frame(void), net_test_stall(void); rt_stall_frame(); net_test_stall(); }
+    { extern void game_frame(void); game_frame(); }   /* lap records (game.c) */
     frame_begin();
     memcpy(cur->fog_lut, fog_lut, sizeof fog_lut);
     GFrame *f = cur; cur = NULL;
