@@ -2,6 +2,11 @@
   "game": "NFS4 High Stakes",
   "about": "What changed on nfs4.xyz, day by day. Kinds: new, improved, fixed. Days run 05:00 to 05:00 Polish time. nfs3-webgl's tools/discord/changelog.mjs posts them to Discord.",
   "days": [
+    { "date": "2026-11-16", "items": [
+      ["new", "Lap Records: each racer's best lap on every track, online races too, with ▶ replay to watch that race in your game."],
+      ["new", "Your name is yours, lap records included. 8 words (Use on another device) make you the same racer elsewhere. No account."],
+      ["improved", "Online: invite links wait for nearby relay servers; links that fail log why."]
+    ] },
     { "date": "2026-11-15", "items": [
       ["fixed", "Crackling, robotic sound in the browser."],
       ["fixed", "Running out of memory after long sessions or many races."],
