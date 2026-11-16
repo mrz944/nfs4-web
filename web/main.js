@@ -1222,6 +1222,9 @@ function setupOnline() {
   net.addEventListener('rooms', redraw);
   net.addEventListener('status', drawRoom);
   net.addEventListener('log', (e) => log('online:', e.detail));
+  // ?icetest: try each STUN and TURN server on its own and log what each gives (for players
+  // whose links never come up)
+  if (new URLSearchParams(location.search).has('icetest')) { net.fetchIce(); net.iceWait().then(() => net.probeIce()); }
   net.addEventListener('disconnected', () => { server('offline', 'bad'); redraw(); if (!gameStarted) setTimeout(connect, 3000); });
 
   // invite links (#room=code) join straight away (asking for the password if needed)

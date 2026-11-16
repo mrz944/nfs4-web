@@ -15,6 +15,11 @@ const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudf
 const BCAST = 'ffffffffffff';
 const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
 const unhex = (s) => Uint8Array.from(s.match(/../g), (h) => parseInt(h, 16));
+// for the link log: a candidate as "relay/udp" (its type and protocol, never its address)
+const candType = (c) => { const s = c?.candidate || ''; const t = / typ (\w+)/.exec(s)?.[1]; return t ? `${t}/${/ (udp|tcp) /i.exec(s)?.[1].toLowerCase() || '?'}` : null; };
+const count = (o, k) => { if (k) o[k] = (o[k] || 0) + 1; };
+const tally = (o) => Object.entries(o).map(([k, n]) => `${k}x${n}`).join(' ') || 'none';
+const pairSide = (c) => !c ? '?' : `${c.candidateType}/${c.protocol}${c.relayProtocol ? `(turn ${c.relayProtocol})` : ''}${c.networkType && c.networkType !== 'unknown' ? ` ${c.networkType}` : ''}`;
 
 // ---- redundant framing: [u32 seq of newest][n][ (u16 len, bytes) newest first ... ]
 const REDUNDANT = 3, REDUNDANT_BYTES = 1000, REDUNDANT_AGE_MS = 250;
@@ -76,15 +81,19 @@ export class Net extends EventTarget {
     this.useWorker = false;      // the network worker (net-worker.js) carries the packets, see startWorker()
     this.worker = null; this.workerOn = false; this.workerRelay = false; this.canTransfer = null;
     this.ice = ICE; this.iceAt = 0; this.turn = false;
+    this.player = null;          // () => Promise<{k, s}>: the page's player key (players.mjs), sent with create/hello
   }
   // the ICE servers for new links, refreshed now and then (the TURN credentials are short-lived)
   fetchIce() {
     if (Date.now() - this.iceAt < 3600e3) return;
     this.iceAt = Date.now();
-    fetch('__ice', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
+    this.iceReady = fetch('__ice', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
       if (Array.isArray(j.iceServers) && j.iceServers.length) { this.ice = j.iceServers; if (j.turn && !this.turn) this.emit('log', 'TURN relays available for direct links'); this.turn = !!j.turn; }
     }).catch(() => {});
   }
+  // before joining a room: the links to its members are made at once, so wait (briefly) for the
+  // TURN servers, or those links would try STUN only
+  iceWait() { return Promise.race([this.iceReady, new Promise((r) => setTimeout(r, 2000))]); }
 
   // ------------------------------------------------------------- server
   // one WebSocket for the room browser and for the room we're in
@@ -189,9 +198,9 @@ export class Net extends EventTarget {
   }
   request(msg) {
     if (this.id) return Promise.reject(new Error('Already in a room.'));
-    return this.connect().then(() => new Promise((resolve, reject) => {
+    return this.connect().then(() => Promise.all([this.iceWait(), this.player?.()])).then(([, who]) => new Promise((resolve, reject) => {
       this.waiting = { resolve, reject };
-      this.send(msg);
+      this.send(who ? { ...msg, ...who } : msg);
       setTimeout(() => { if (this.waiting?.resolve === resolve) { this.waiting = null; reject(new Error('The online server did not answer.')); } }, 8000);
     }));
   }
@@ -205,7 +214,7 @@ export class Net extends EventTarget {
   }
   closePeer(id) {
     const p = this.peers.get(id); if (!p) return;
-    clearInterval(p.statsTimer); try { p.pc.close(); } catch {}
+    clearInterval(p.statsTimer); clearTimeout(p.iceTimer); try { p.pc.close(); } catch {}
     this.peers.delete(id); this.pingTable.delete(id);
     this.postPeers();
   }
@@ -220,8 +229,18 @@ export class Net extends EventTarget {
                 ctr: { tx: 0, txRelay: 0, rx: 0, rxRelay: 0, last: 0, maxGap: 0, gaps: 0, recovered: 0 } };
     this.peers.set(id, p);
     this.postPeers();
-    p.pc.onicecandidate = (e) => { if (e.candidate) this.send({ t: 'signal', to: id, data: { ice: e.candidate } }); };
-    p.pc.onconnectionstatechange = () => { if (p.pc.connectionState === 'failed') this.emit('log', `no direct connection to ${name}, using the relay`); this.emit('status'); };
+    // what ICE had to work with, for the log when a link fails (candidate types only, no addresses)
+    p.diag = { loc: {}, rem: {}, errs: [], turn: this.ice.some((s) => [].concat(s.urls).some((u) => /^turns?:/.test(u))) };
+    p.pc.onicecandidate = (e) => { if (e.candidate) { count(p.diag.loc, candType(e.candidate)); this.send({ t: 'signal', to: id, data: { ice: e.candidate } }); } };
+    p.pc.onicecandidateerror = (e) => {
+      if (p.diag.errs.length < 6) p.diag.errs.push(`${e.errorCode} ${(e.url || '').replace('?transport=', '/')} ${e.errorText || ''}`.trim());
+    };
+    p.pc.onconnectionstatechange = () => {
+      if (p.pc.connectionState === 'failed') { this.emit('log', `no direct connection to ${name}, using the relay`); this.iceReport(p); }
+      this.emit('status');
+    };
+    // some links never fail, they just never come up (no candidates of our own): report those too
+    p.iceTimer = setTimeout(() => { if (!p.direct && this.peers.get(id) === p) this.iceReport(p, 'not up after 20 s'); }, 20000);
     const setup = (dc) => {
       if (this.giveToWorker(id, dc)) { p.inWorker = true; return; }
       p.dc = dc; dc.binaryType = 'arraybuffer';
@@ -241,9 +260,59 @@ export class Net extends EventTarget {
       const stats = await p.pc.getStats();
       let pair = null;
       stats.forEach((s) => { if (s.type === 'candidate-pair' && s.nominated && s.currentRoundTripTime != null) { p.rtt = s.currentRoundTripTime * 1000; pair = s; } });
-      if (pair) { const loc = stats.get(pair.localCandidateId), rem = stats.get(pair.remoteCandidateId); p.turn = loc?.candidateType === 'relay' || rem?.candidateType === 'relay'; }
+      if (pair) {
+        const loc = stats.get(pair.localCandidateId), rem = stats.get(pair.remoteCandidateId);
+        p.turn = loc?.candidateType === 'relay' || rem?.candidateType === 'relay';
+        if (!p.pairLogged) { p.pairLogged = true; this.emit('log', `link to ${name}: ${pairSide(loc)} <-> ${pairSide(rem)}`); }
+      }
       this.emit('status');
     }, 2000);
+  }
+  // each ICE server URL on its own: the candidates it gives in 10 s and the errors (no addresses,
+  // no credentials in the log)
+  async probeIce() {
+    const urls = [];
+    for (const s of [...this.ice, ...ICE]) for (const u of [].concat(s.urls)) {
+      if (!urls.some((x) => x.urls === u)) urls.push({ urls: u, username: s.username, credential: s.credential });
+    }
+    this.emit('log', `ice probe: ${urls.length} server URLs, ${this.turn ? 'with' : 'without'} TURN`);
+    const one = (srv) => new Promise((resolve) => {
+      const relay = /^turns?:/.test(srv.urls), t0 = performance.now(), got = {}, errs = [];
+      let pc;
+      try { pc = new RTCPeerConnection({ iceServers: [srv], iceTransportPolicy: relay ? 'relay' : 'all' }); }
+      catch (e) { resolve(`refused (${e.name}: ${e.message})`); return; }
+      let first = null;
+      pc.onicecandidate = (e) => { const t = candType(e.candidate); if (t) { count(got, t); if (first == null && (relay ? /^relay/ : /^srflx/).test(t)) first = performance.now() - t0; } };
+      pc.onicecandidateerror = (e) => { if (errs.length < 3) errs.push(`${e.errorCode} ${e.errorText || ''}`.trim()); };
+      const end = () => {
+        clearTimeout(timer); const state = pc.iceGatheringState; pc.close();
+        resolve(`${tally(got)}${first != null ? ` (first in ${Math.round(first)} ms)` : ''} gathering=${state}${errs.length ? ` errors ${errs.join('; ')}` : ''}`);
+      };
+      const timer = setTimeout(end, 10000);
+      pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') end(); };
+      pc.createDataChannel('probe');
+      pc.createOffer().then((o) => pc.setLocalDescription(o)).catch((e) => { errs.push(`offer: ${e.name}`); end(); });
+    });
+    const res = await Promise.all(urls.map(one));
+    urls.forEach((s, i) => this.emit('log', `ice probe ${s.urls.replace('?transport=', '/')}: ${res[i]}`));
+  }
+  // one line about a failed link: whether TURN was offered, the candidates each side gathered,
+  // how the candidate pairs ended, and the TURN servers' errors
+  iceReport(p, why = 'failed') {
+    if (p.reported) return;
+    p.reported = true;
+    const d = p.diag, pc = p.pc;
+    p.pc.getStats().then((stats) => {
+      const pairs = {};
+      stats.forEach((s) => {
+        if (s.type !== 'candidate-pair') return;
+        const l = stats.get(s.localCandidateId), r = stats.get(s.remoteCandidateId);
+        count(pairs, `${l?.candidateType || '?'}-${r?.candidateType || '?'}:${s.state}`);
+      });
+      this.emit('log', `ice to ${p.name} (${why}): turn=${d.turn ? 'yes' : 'no'} gathering=${pc.iceGatheringState} ice=${pc.iceConnectionState}`
+        + ` signaling=${pc.signalingState} | ours ${tally(d.loc)} | theirs ${tally(d.rem)} | pairs ${tally(pairs)}`
+        + (d.errs.length ? ` | errors ${d.errs.join('; ')}` : ''));
+    }).catch((e) => this.emit('log', `ice to ${p.name}: no stats (${e.message})`));
   }
   async onSignal(from, data) {
     let p = this.peers.get(from);
@@ -254,7 +323,10 @@ export class Net extends EventTarget {
         await p.pc.setLocalDescription(await p.pc.createAnswer());
         this.send({ t: 'signal', to: from, data: { sdp: p.pc.localDescription } });
       }
-    } else if (data.ice) { try { await p.pc.addIceCandidate(data.ice); } catch {} }
+    } else if (data.ice) {
+      count(p.diag.rem, candType(data.ice));
+      try { await p.pc.addIceCandidate(data.ice); } catch (e) { if (p.diag.errs.length < 6) p.diag.errs.push(`theirs refused: ${e.name}`); }
+    }
   }
 
   // ----------------------------------------------------------- packets
