@@ -1,6 +1,8 @@
 // Local static server for the web build, with the headers shared-memory
 // threads need (cross-origin isolation).
-//   node web/serve.mjs [port] [--game DIR] [--daily HH:MM] [--tailscale [httpsPort]] [--funnel [httpsPort]] [--relay-tcp PORT|PATH]
+//   node web/serve.mjs [port] [--game DIR] [--daily HH:MM] [--tailscale [httpsPort]] [--funnel [httpsPort]] [--relay-tcp PORT|PATH] [--data DIR]
+// --data DIR: where logs, stats, lap records, players and push subscriptions live (default: build/ next to
+// web/); tests point it at a folder of their own.
 // --daily HH:MM: a daily race at that time (server clock): shown on the start page, with push
 // notifications 10 minutes before and at the start.
 // --funnel publishes the page, WebAssembly build and configured game files publicly.
@@ -15,11 +17,16 @@ import { execFileSync, spawn } from 'node:child_process';
 import { appendFileSync, createReadStream, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { clientIp, foreignOrigin, handleUpgrade, listenRaw, liveSummary, onRoomCreated, roomStats, setPlayLog } from './relay.mjs';
+import { clientIp, foreignOrigin, handleUpgrade, listenRaw, liveSummary, onRoomCreated, roomStats, setPlayers, setPlayLog } from './relay.mjs';
 import { createPush, dailyRace } from './push.mjs';
 import { createAnalytics } from './analytics.mjs';
+import { createPlayers, foldName } from './players.mjs';
+import { playersSection } from './player-stats.mjs';
+import { createLaps } from './laps.mjs';
+import { createReplays } from './replays.mjs';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)));
+let data = resolve(root, '..', 'build');          // --data DIR (below) moves it
 // --game DIR: serve game files for automatic browser download into OPFS.
 // The HTTP listener stays on loopback; Tailscale provides public HTTPS.
 const args = process.argv.slice(2);
@@ -36,6 +43,9 @@ const dailyAt = di >= 0 ? args.splice(di, 2)[1] : '';
 const ri = args.indexOf('--relay-tcp');
 const rawArg = ri >= 0 ? args.splice(ri, 2)[1] : '';
 const rawPort = /^\d+$/.test(rawArg) ? Number(rawArg) : rawArg;   // port or Unix socket path
+const dai = args.indexOf('--data');
+const dataDir = dai >= 0 ? resolve(args.splice(dai, 2)[1]) : null;
+if (dataDir) data = dataDir;
 const port = Number(args[0] || process.env.PORT || 8080);
 function listFiles(dir, pre = '') {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -50,7 +60,7 @@ const types = {
 // client logs: the page POSTs its log to /__log (see main.js); kept in build/clientlogs/.
 // Bounded: 20 MiB per session, 2 GiB in all (new sessions are dropped past that), and at
 // most 30 new sessions per address per hour.
-const logDir = resolve(root, '..', 'build', 'clientlogs');
+const logDir = join(data, 'clientlogs');
 const LOG_CAP = 20 << 20, LOG_TOTAL = 2 ** 31, LOG_NEW_PER_HOUR = 30;
 let logBytes = 0;
 try { for (const f of readdirSync(logDir)) logBytes += statSync(join(logDir, f)).size; } catch {}
@@ -86,7 +96,7 @@ function clientLog(req, res) {
 // NFS4_STATS_PASSWORD or build/stats-password (made on first start, readable only by you).
 const statsPassword = (() => {
   if (process.env.NFS4_STATS_PASSWORD) return process.env.NFS4_STATS_PASSWORD;
-  const f = resolve(root, '..', 'build', 'stats-password');
+  const f = join(data, 'stats-password');
   try { return readFileSync(f, 'utf8').trim(); } catch {}
   const pw = randomBytes(15).toString('base64url');
   mkdirSync(dirname(f), { recursive: true });
@@ -113,7 +123,7 @@ setInterval(() => {
     if (r.players.length < 2) continue;
     mkdirSync(logDir, { recursive: true });
     const line = `${new Date().toISOString()} ${r.racing ? 'racing' : 'lobby'} host=${r.host ?? '?'} ` +
-      r.players.map((p) => `${p.name}:${p.state}:${p.rtt != null ? Math.round(p.rtt) + 'ms' : '?'}`).join(' ') + '\n';
+      r.players.map((p) => `${p.name}${p.p ? `(${p.p})` : ''}:${p.state}:${p.rtt != null ? Math.round(p.rtt) + 'ms' : '?'}`).join(' ') + '\n';
     try { appendFileSync(join(logDir, `room-${r.code.replace(/[^a-z0-9]/gi, '')}.log`), line); } catch {}
   }
 }, 5000).unref();
@@ -124,7 +134,7 @@ setInterval(() => {
 // ?v=<build>: index.html and our .js files are rewritten on the way out, and a new build means
 // new addresses. Inside dist/nfs4.js the same goes for "nfs4.js" (its game threads load it
 // again) and "nfs4.wasm". sw.js keeps a fixed address (a service worker is identified by it).
-const SCRIPTS = ['main.js', 'net.js', 'net-worker.js', 'audio-worklet.js', 'opfs.js', 'opfs-writer.js', 'dist/nfs4.js'];
+const SCRIPTS = ['main.js', 'net.js', 'net-worker.js', 'audio-worklet.js', 'opfs.js', 'opfs-writer.js', 'replay-watch.js', 'dist/nfs4.js'];
 let verCache = { t: 0, v: '' };
 function version() {
   if (Date.now() - verCache.t < 2000) return verCache.v;
@@ -135,22 +145,33 @@ function version() {
 }
 function versioned(text) {
   const v = version();
-  return text.replace(/(["'])(\.\/)?(main\.js|net\.js|net-worker\.js|audio-worklet\.js|opfs\.js|opfs-writer\.js|dist\/nfs4\.js|nfs4\.js|nfs4\.wasm)\1/g, (m, q, dot, f) => `${q}${dot || ''}${f}?v=${v}${q}`);
+  return text.replace(/(["'])(\.\/)?(main\.js|net\.js|net-worker\.js|audio-worklet\.js|opfs\.js|opfs-writer\.js|replay-watch\.js|dist\/nfs4\.js|nfs4\.js|nfs4\.wasm)\1/g, (m, q, dot, f) => `${q}${dot || ''}${f}?v=${v}${q}`);
 }
 
-// page analytics (analytics.mjs): events in build/analytics/, summary at /__stats
-const analytics = createAnalytics(resolve(root, '..', 'build', 'analytics'));
-const playDir = resolve(root, '..', 'build', 'analytics');
+// players (players.mjs): a name, its laps and its logs, tied to the page's player key
+const players = createPlayers(join(data, 'players'));
+setPlayers(players);
+
+// page analytics (analytics.mjs): events in build/analytics/, summary at /__stats; an event
+// that comes with a player key is stored with that player's id
+const analytics = createAnalytics(join(data, 'analytics'), { player: (k) => players.idOfToken(k) });
+const playDir = join(data, 'analytics');
 setPlayLog(playDir);
+// lap records (laps.mjs): POST /__lap from the game page, GET /__laps for the start page
+const laps = createLaps(join(data, 'laps'), players);
+// replays of the races the best laps were driven in (replays.mjs): POST /__replay, GET /__replay/<race>.rp4
+const replays = createReplays(join(data, 'replays'), { players, laps });
+const playersStats = playersSection({ players, laps, playDir, logDir, sessionsDir: join(data, 'players') });
 
 // push notifications (push.mjs) and the daily race
-const push = createPush(resolve(root, '..', 'build', 'push'));
+const push = createPush(join(data, 'push'));
 onRoomCreated((r) => push.roomOpened(r));
 const daily = dailyAt ? dailyRace(dailyAt, (m) => push.notify(m)) : null;
 if (dailyAt && !daily) { console.error('--daily needs HH:MM'); process.exit(1); }
 
 // start page activity (/__live): who is online now, the most active racers (time spent in
-// online games, from relay.mjs play-*.jsonl), the daily race and the current build
+// online games, from relay.mjs play-*.jsonl; per player, under the current name, or per name
+// for time from before player keys), the daily race and the current build
 let topCache = { t: 0, v: null };
 function topRacers() {
   if (Date.now() - topCache.t < 60e3) return topCache.v;
@@ -159,12 +180,16 @@ function topRacers() {
     for (const f of readdirSync(playDir).filter((f) => f.startsWith('play-'))) {
       for (const line of readFileSync(join(playDir, f), 'utf8').split('\n')) {
         let r; try { r = JSON.parse(line); } catch { continue; }
-        for (const k in win) if (now - r.t < win[k]) sums[k].set(r.n, (sums[k].get(r.n) || 0) + r.s);
+        const lo = r.p ? null : players.legacyOwner(foldName(r.n));
+        const who = r.p ? players.resolve(r.p) : lo === undefined ? 'n:' + foldName(r.n) : lo;
+        if (!who) continue;
+        for (const k in win) if (now - r.t < win[k]) { const o = sums[k].get(who) || { s: 0, n: r.n }; o.s += r.s; o.n = r.n; sums[k].set(who, o); }
       }
     }
   } catch {}
   const v = {};
-  for (const k in sums) v[k] = [...sums[k]].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([n, s]) => ({ n, min: Math.round(s / 60) }));
+  for (const k in sums) v[k] = [...sums[k]].sort((a, b) => b[1].s - a[1].s).slice(0, 10)
+    .map(([who, o]) => ({ n: who.startsWith('n:') ? o.n : players.nameOf(who) || o.n, ...(who.startsWith('n:') ? {} : { p: who }), min: Math.round(o.s / 60) }));
   topCache = { t: Date.now(), v };
   return v;
 }
@@ -181,7 +206,7 @@ function live(res) {
 // from the dashboard's Realtime > TURN; free up to 1 TB a month) the page also gets TURN
 // servers on Cloudflare's edge near each player: short-lived credentials, minted here and
 // renewed before they expire, never the key itself. Without the file: STUN only, as before.
-const turnFile = resolve(root, '..', 'build', 'cloudflare', 'turn.json');
+const turnFile = join(data, 'cloudflare', 'turn.json');
 const ICE_TTL = 6 * 3600;
 let iceCache = { until: 0, servers: null, pending: null };
 async function iceServers() {
@@ -233,7 +258,12 @@ const server = createServer((req, res) => {
     if (foreignOrigin(req)) { res.writeHead(403).end(); req.resume(); return; }
     analytics.handleEvent(req, res); return;
   }
-  if (url.pathname === '/__stats') { if (statsAllowed(req, res)) analytics.handleStats(req, res, roomStats); return; }
+  if (url.pathname === '/__stats') { if (statsAllowed(req, res)) analytics.handleStats(req, res, roomStats, playersStats); return; }
+  if (['/__me', '/__name', '/__merge', '/__forget'].includes(url.pathname)) { players.handle(req, res, url); return; }
+  if (req.method === 'POST' && url.pathname === '/__lap') { laps.handlePost(req, res); return; }
+  if (url.pathname === '/__laps') { laps.handleGet(req, res); return; }
+  if (req.method === 'POST' && url.pathname === '/__replay') { replays.handlePost(req, res, url); return; }
+  if (url.pathname.startsWith('/__replay/')) { replays.handleGet(req, res, url); return; }
   if (req.method === 'POST' && url.pathname === '/__log') { clientLog(req, res); return; }
   if (url.pathname === '/__live') { live(res); return; }
   if (url.pathname === '/__ice') { ice(req, res); return; }
@@ -286,7 +316,7 @@ process.on('unhandledRejection', (e) => console.error('[server] unhandled reject
 if (rawPort) listenRaw(rawPort);
 server.listen(port, '127.0.0.1', () => {
   console.log(`NFS4 web runtime: http://localhost:${port}/` + (gameDir ? `  (game folder: ${gameDir}, automatic download)` : ''));
-  console.log(`stats:            http://localhost:${port}/__stats  (password: ${process.env.NFS4_STATS_PASSWORD ? '$NFS4_STATS_PASSWORD' : 'build/stats-password'})`);
+  console.log(`stats:            http://localhost:${port}/__stats  (password: ${process.env.NFS4_STATS_PASSWORD ? '$NFS4_STATS_PASSWORD' : dataDir ? join(data, 'stats-password') : 'build/stats-password'})`);
   if (daily) console.log(`daily race:       ${daily.time} (server time), next ${new Date(daily.next()).toString().slice(0, 21)}; ${push.count} push subscriber(s)`);
   if (funnel && ![443, 8443, 10000].includes(tsPort)) { console.error('Funnel only works on ports 443, 8443 and 10000'); process.exit(1); }
   if (tsPort) startTailscale();

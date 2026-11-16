@@ -189,6 +189,10 @@
   #online .check input { width: auto; accent-color: var(--aqua); }
   .namebox { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .namebox input { max-width: 220px; }
+  /* the name's state (players.mjs): yours, another player's, ... and the passphrase link */
+  .namehint { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  .namehint.ok { color: var(--ok); } .namehint.bad { color: var(--err); }
+  .namehint a { color: var(--aqua); white-space: nowrap; }
   .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px; }
   .bar h3 { margin: 0; }
   .card { margin-top: 10px; padding: 12px; clip-path: var(--notch); background: rgba(1, 6, 36, .88);
@@ -270,6 +274,21 @@
   #top { margin-top: 8px; } .tabs { display: flex; gap: 4px; }
   .tabs button { font-size: 16px; padding: 2px 8px; background: #0b1656; color: var(--muted); box-shadow: inset 0 0 0 2px #24348a; clip-path: none; text-shadow: none; }
   .tabs button.on { background: var(--aqua); color: var(--ink); box-shadow: none; }
+  /* Lap Records (setupLaps in main.js) */
+  .lapbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  #laps-track { flex: 1 1 160px; min-width: 0; background: var(--ink); color: var(--text); border: 0; border-radius: 0; padding: 5px 7px; font: 13px var(--ui); box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #34489c; }
+  #laps-list { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; }
+  #laps-list li { display: grid; grid-template-columns: 1.8em minmax(0, 1fr) auto; gap: 2px 6px; align-items: baseline; padding: 3px 4px; border-top: 2px solid #0e1a5c; }
+  #laps-list li.muted { display: block; }
+  #laps-list .r { color: var(--muted); text-align: right; font-family: var(--px); -webkit-font-smoothing: none; } #laps-list li:nth-child(1) .r { color: var(--aqua); }
+  #laps-list .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #laps-list .c { grid-column: 2; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #laps-list .tm { grid-column: 3; grid-row: 1 / 3; align-self: center; color: var(--ok); font: 16px/1 var(--px); -webkit-font-smoothing: none; }
+  #laps-list li.me .n { color: var(--aqua); }
+  #laps-list .rpl { margin-left: 8px; color: var(--aqua); text-decoration: none; white-space: nowrap; } #laps-list .rpl:hover { text-decoration: underline; }
+  #laps-note { margin: 8px 0 0; color: var(--ok); } #laps-note a { color: var(--aqua); }
+  .ltag { display: inline-block; font-size: 10px; line-height: 1.3; padding: 0 4px; margin-left: 4px; background: #24348a; color: #c8d2ff; vertical-align: 1px; }
+  .lapnote { margin: 10px 0 0; font-size: 11px; }
   #top-list { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; }
   #top-list li { display: grid; grid-template-columns: 1.8em 1fr auto; gap: 6px; padding: 3px 4px; border-top: 2px solid #0e1a5c; }
   #top-list .r { color: var(--muted); text-align: right; font-family: var(--px); } #top-list li:nth-child(1) .r { color: var(--aqua); } #top-list .f { color: var(--ok); }
@@ -385,6 +404,21 @@
   #changelog-list .ck.new { background: var(--cl); } #changelog-list .ck.improved { background: #8cb8ff; } #changelog-list .ck.fixed { background: #7fdf96; }
   #changelog .clfoot { margin: 0; padding: 8px 16px 12px; font-size: 11px; color: var(--muted); }
   #changelog .clfoot a { color: var(--cl); }
+  /* Your Passphrase (setupPlayer in main.js) */
+  #player { padding: 0; border: 0; background: transparent; color: var(--text); width: min(580px, calc(100vw - 32px)); max-width: none; max-height: none; overflow: visible; }
+  #player::backdrop { background: rgba(0, 2, 12, .74); }
+  #player > .panel { display: flex; flex-direction: column; max-height: min(88vh, 760px); max-height: min(88dvh, 760px); }
+  #player .ph button { padding: 4px 10px; font-size: 13px; }
+  #player .plbody { overflow-y: auto; overscroll-behavior: contain; font: 13px/1.5 var(--ui); }
+  #player p { margin: 0 0 10px; }
+  #player h3 { margin: 18px 0 8px; font: 700 15px/1.2 var(--px); color: var(--aqua); text-transform: uppercase; }
+  .plwords { padding: 10px 12px; background: var(--ink); color: var(--aqua); font: 700 17px/1.6 var(--ui); word-spacing: .35em; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all;
+    box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #34489c; }
+  #pl-in { width: 100%; background: var(--ink); color: var(--text); border: 0; border-radius: 0; padding: 6px 8px; font: 14px var(--ui); box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #34489c; }
+  #pl-read { margin: 6px 0 0; font-size: 12px; min-height: 1.5em; } #pl-read.bad { color: var(--err); }
+  #player .check { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; } #player .check input { accent-color: var(--aqua); }
+  #player .msg.ok { color: var(--ok); } #player .actions { flex-wrap: wrap; }
+  #player .plforget { margin: 16px 0 0; font-size: 11px; } #player .plforget a { color: var(--muted); }
   .mbtn .clnew { display: none; margin-left: auto; padding: 2px 5px 1px; font: 400 10px/1 var(--px); font-style: normal; color: #000; background: var(--gold, #ffd800); letter-spacing: 0; }
   .mbtn.fresh .clnew { display: inline-block; }
 </style>
@@ -450,6 +484,7 @@
             <input id="pname" maxlength="10" autocomplete="nickname" placeholder="Player1234" title="Up to 10 letters, digits and . _ - !. Used in the lobby and in the game.">
             <span class="muted">Racers online:<span class="counter" id="online-count"><i>0</i><i>0</i><i>0</i></span></span>
           </div>
+          <p id="name-hint" class="namehint" hidden></p>
           <p id="lobby-msg" class="msg" hidden></p>
 
           <div id="activity">
@@ -503,6 +538,20 @@
               (ideally the best host) picks <b>Create Game</b> and chooses <b>Positional Updates</b>; the others click
               <b>Refresh Game List</b>, pick the game under <b>Games Available</b> and click <b>Join Game</b>.</p>
           </section>
+        </div>
+      </section>
+
+      <section class="panel" id="laps">
+        <div class="ph"><h2>lap records</h2><span id="laps-count" class="pill">…</span></div>
+        <div class="pb">
+          <div class="lapbar">
+            <select id="laps-track" aria-label="Track"></select>
+            <div id="laps-dir" class="tabs"><button data-d="f" class="on">Forward</button><button data-d="b">Backward</button></div>
+          </div>
+          <ol id="laps-list"></ol>
+          <p id="laps-note" hidden></p>
+          <p class="muted lapnote">Each racer's best lap on the track, from any race you finish a lap in: single race, tournament, knockout, Hot Pursuit, High Stakes or online. <b>▶ replay</b>: the game's replay of the race the lap was in, to watch in your game.
+            Tags: <span class="ltag">MIR</span> mirrored, <span class="ltag">NGT</span> night, <span class="ltag">WTH</span> weather.</p>
         </div>
       </section>
 
@@ -796,6 +845,28 @@
     <div class="ph"><h2 id="changelog-title">What's New</h2><button id="changelog-close" type="button" class="secondary">Close</button></div>
     <div id="changelog-list"></div>
     <p class="clfoot">Changes to nfs4.xyz, day by day. Follow every change in <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">#changelog on Discord</a>.</p>
+  </section>
+</dialog>
+<dialog id="player" aria-labelledby="player-title">
+  <section class="panel">
+    <div class="ph"><h2 id="player-title">Your Passphrase</h2><button id="player-close" type="button" class="secondary">Close</button></div>
+    <div class="pb plbody">
+      <p>These 8 words are your player: your name <b id="pl-name"></b> and your lap records. Enter them on another phone or computer to race there as you.
+        Keep a copy somewhere safe: they can't be recovered, and anyone who has them can race as you.</p>
+      <p id="pl-words" class="plwords"></p>
+      <div class="actions"><button id="pl-copy" type="button" class="small">Copy</button><button id="pl-download" type="button" class="small secondary">Download</button><button id="pl-save" type="button" class="small secondary" hidden>Save in browser passwords</button></div>
+      <p id="pl-note" class="muted" hidden></p>
+      <h3>A passphrase from another device</h3>
+      <form id="pl-use">
+        <input id="pl-in" type="password" name="password" autocomplete="current-password" placeholder="its 8 words (the first 3 letters of each are enough)" spellcheck="false" autocapitalize="off" aria-label="Passphrase">
+        <p id="pl-read" class="muted"></p>
+        <label class="check" id="pl-bring-l" hidden><input id="pl-bring" type="checkbox" checked> <span id="pl-bring-t">Bring this browser's lap records along</span></label>
+        <div class="actions"><button type="submit" class="small">Use it here</button></div>
+      </form>
+      <p id="pl-msg" class="msg" hidden></p>
+      <p class="muted plforget"><a href="#" id="pl-forget">Delete my player</a>: its name and lap records go from the server, and this browser gets a new passphrase.</p>
+      <p class="muted plforget">Words from the <a href="https://www.eff.org/dice" target="_blank" rel="noopener">EFF short word list</a> (CC BY 3.0). The server never sees them, only a hash of them.</p>
+    </div>
   </section>
 </dialog>
 <script type="module" src="main.js"></script>

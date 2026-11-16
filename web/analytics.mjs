@@ -4,6 +4,10 @@
 // appended to build/analytics/events-YYYY-MM.jsonl with a visitor id that is a hash
 // of (daily random salt, IP, user agent): the same visitor counts once a day, but
 // visitors can't be followed across days and the IP can't be recovered.
+// Players (players.mjs) are the exception: an event that comes with the page's player key (k)
+// is stored with that player's random public id (p), so one player's sessions, laps and
+// problems can be looked at together (the Players section of /__stats). The key itself is
+// never stored, and neither is the IP.
 // GET /__stats renders a summary of the last 30 days plus the live rooms.
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
@@ -26,7 +30,7 @@ export function browserOf(ua = '') {
   return { browser: name, version: m ? Number(m[2]) : 0, os };
 }
 
-export function createAnalytics(dir) {
+export function createAnalytics(dir, { player = () => null } = {}) {
   mkdirSync(dir, { recursive: true });
   const fileFor = (d = new Date()) => join(dir, `events-${d.toISOString().slice(0, 7)}.jsonl`);
 
@@ -45,6 +49,8 @@ export function createAnalytics(dir) {
         else if (typeof v === 'string') data[k] = v.slice(0, 80);
       }
       const rec = { t: Date.now(), e: e.e, v: visitor(req), s: String(e.s || '').slice(0, 40), d: data };
+      const p = typeof e.k === 'string' ? player(e.k) : null;
+      if (p) rec.p = p;
       if (e.e === 'view') Object.assign(rec.d, browserOf(req.headers['user-agent']));
       try { appendFileSync(fileFor(), JSON.stringify(rec) + '\n'); } catch (err) { console.log('[analytics] write failed:', err.message); }
     });
@@ -61,7 +67,8 @@ export function createAnalytics(dir) {
     return out;
   }
 
-  function handleStats(req, res, live) {
+  // extra(events, url): more sections (the Players section, player-stats.mjs)
+  function handleStats(req, res, live, extra) {
     const ev = load(30);
     const by = (name) => ev.filter((r) => r.e === name);
     const uniq = (arr, k) => new Set(arr.map(k)).size;
@@ -84,12 +91,15 @@ export function createAnalytics(dir) {
     const card = (label, value) => `<div class="c"><div class="v">${esc(value)}</div><div class="l">${esc(label)}</div></div>`;
     const table = (head, rows) => `<table><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</table>`;
     const rooms = live();
+    let more = '';
+    try { more = extra ? extra(ev, new URL(req.url, 'http://x')) : ''; } catch (e) { more = `<h2>Players</h2><p class="m">failed: ${esc(e.message)}</p>`; }
     const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NFS4 Stats</title>
 <style>body{margin:0;background:#030b3d;color:#eef2ff;font:13px/1.5 Verdana,Tahoma,sans-serif;padding:16px}main{max-width:960px;margin:0 auto}
 h1{font:italic 900 28px "Arial Black",Arial,sans-serif;color:#ffd000;margin:0 0 4px;text-transform:uppercase}h2{font:italic 900 15px "Arial Black",Arial,sans-serif;color:#ffd000;text-transform:uppercase;margin:22px 0 6px;border-bottom:1px solid #ffcc0080}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}.c{background:#0a1a66;border:1px solid #2e3d8c;border-left:3px solid #ffd000;padding:8px 10px}.v{font:bold 22px Verdana,sans-serif}.l{color:#9fb0e6;font-size:11px}
-table{border-collapse:collapse;width:100%;font-size:12px}th{text-align:left;color:#ffd000;font-size:10px;text-transform:uppercase;letter-spacing:.08em;padding:4px 8px;background:#0d1858}td{padding:4px 8px;border-top:1px solid #16205c}.m{color:#9fb0e6}.wrap{overflow-x:auto}.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:640px){.cols{grid-template-columns:1fr}}</style>
-<main><h1>Stats</h1><div class="m">Last 30 days · no cookies, visitor ids are hashed per day</div>
+table{border-collapse:collapse;width:100%;font-size:12px}th{text-align:left;color:#ffd000;font-size:10px;text-transform:uppercase;letter-spacing:.08em;padding:4px 8px;background:#0d1858}td{padding:4px 8px;border-top:1px solid #16205c}.m{color:#9fb0e6}.wrap{overflow-x:auto}.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:640px){.cols{grid-template-columns:1fr}}
+.q{display:flex;gap:6px;margin:10px 0}.q input{flex:0 1 260px;min-width:0;background:#010624;color:#eef2ff;border:1px solid #2e3d8c;padding:5px 8px;font:13px Verdana,sans-serif}.q button{background:#ffd000;color:#000;border:0;padding:5px 12px;font:bold 12px Verdana,sans-serif;cursor:pointer}</style>
+<main><h1>Stats</h1><div class="m">Last 30 days · no cookies, visitor ids are hashed per day; players by their random player id</div>
 <h2>Overview</h2><div class="cards">${[
       card('visitors (per-day unique)', [...days.values()].reduce((n, d) => n + d.visitors.size, 0)),
       card('page views', views.length), card('game starts', starts.length), card('online game starts', by('online_start').length),
@@ -105,6 +115,7 @@ table{border-collapse:collapse;width:100%;font-size:12px}th{text-align:left;colo
 <h2>By day</h2><div class="wrap">${table(['day', 'visitors', 'views', 'game starts', 'online starts', 'errors'], [...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => [d, x.visitors.size, x.views, x.starts, x.online, x.errors]))}</div>
 <div class="cols"><div><h2>Browsers</h2>${table(['browser', 'views'], count(views, (r) => `${r.d.browser} ${r.d.version || ''} · ${r.d.os}`).slice(0, 12))}</div>
 <div><h2>Screens</h2>${table(['viewport', 'views'], count(views, (r) => `${r.d.w}×${r.d.h}`).slice(0, 12))}</div></div>
+${more}
 <h2>Live rooms</h2><div class="wrap">${rooms.length ? table(['room', 'players', 'racing', 'password'], rooms.map((r) => [r.name, r.players.map((p) => p.name).join(', '), r.racing ? 'yes' : '', r.locked ? 'yes' : ''])) : '<p class="m">No rooms right now.</p>'}</div>
 <h2>Recent errors</h2><div class="wrap">${table(['when', 'kind', 'detail', 'client log'], by('error').slice(-25).reverse().map((r) => [new Date(r.t).toISOString().replace('T', ' ').slice(0, 19), r.d.kind || '', r.d.msg || '', `build/clientlogs/${r.s}.log`]))}</div>
 </main>`;

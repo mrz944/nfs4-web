@@ -47,12 +47,18 @@ export const cleanName = (v) => String(v ?? '').replace(/[^A-Za-z0-9 ._!-]/g, ''
 export const badName = (n) => { const l = leet(n); return BANNED.some((b) => l.includes(b)); };
 const build = (v) => String(v ?? '').replace(/[^\w.:-]/g, '').slice(0, 80);
 
-// racing time per name (for the start page's board): one line per finished game session
+// Players (players.mjs, set by serve.mjs): a member who sends the page's player key (k) plays
+// as that player: its name, and its id (p) in the logs. A name another player owns is refused,
+// with or without a key. Without players (tests) everyone is just a name, as before.
+let players = null;
+export function setPlayers(x) { players = x; }
+
+// racing time per player (for the start page's board): one line per finished game session
 let playLog = null;
 export function setPlayLog(dir) { mkdirSync(dir, { recursive: true }); playLog = dir; }
-function logPlay(name, secs) {
+function logPlay(name, secs, p) {
   if (!playLog || secs < 20) return;
-  try { appendFileSync(join(playLog, `play-${new Date().toISOString().slice(0, 7)}.jsonl`), JSON.stringify({ t: Date.now(), n: name, s: Math.round(secs) }) + '\n'); } catch {}
+  try { appendFileSync(join(playLog, `play-${new Date().toISOString().slice(0, 7)}.jsonl`), JSON.stringify({ t: Date.now(), n: name, ...(p ? { p } : {}), s: Math.round(secs) }) + '\n'); } catch {}
 }
 // room members' connections: why each one closed, resumes, places given up (net-*.jsonl next
 // to the play log), to tell a player's network from this server when someone was cut off
@@ -121,7 +127,7 @@ function newId(room) {
 const roomInfo = (r) => ({
   code: r.code, name: r.name, host: r.owner, locked: !!r.pass, max: r.max, created: r.created,
   racing: [...r.members.values()].some((c) => c.state === 'game'),
-  players: [...r.members.values()].map((c) => ({ name: c.name, rtt: c.rtt, state: c.state })),
+  players: [...r.members.values()].map((c) => ({ name: c.name, rtt: c.rtt, state: c.state, ...(c.p ? { p: c.p } : {}) })),
 });
 
 // room browser updates: soon after any change, and every few seconds for the pings
@@ -138,7 +144,7 @@ setInterval(pushRooms, 4000).unref();
 class Client {
   constructor(sendText, sendBin, close, label) {
     this.sendText = sendText; this.sendBin = sendBin; this.close = close; this.label = label;
-    this.id = null; this.room = null; this.name = ''; this.rtt = null; this.state = 'lobby';
+    this.id = null; this.room = null; this.name = ''; this.rtt = null; this.state = 'lobby'; this.p = null;
     this.token = null; this.gameSince = 0; this.bin = null; this.binFor = null; this.binClient = null;
     this.awayTimer = null; this.opened = Date.now();
     this.bucket = LIMIT.textBurst; this.bucketT = Date.now(); this.badPw = 0;
@@ -154,8 +160,23 @@ class Client {
   send(b) { (this.bin || this.sendBin)(b); }
   json(o) { this.sendText(JSON.stringify(o)); }
   fail(code, error) { this.json({ t: 'error', code, error }); }
+  // the player behind a create/hello: false (and the error sent) when its name is another player's
+  who(m) {
+    this.p = null; this.playerName = '';
+    if (!players) return true;
+    const name = cleanName(m.name);
+    if (typeof m.k === 'string' && m.k) {
+      const r = players.use(m.k, name, this.label);
+      if (r.error === 'taken') { this.fail('name', `${name} is another player's name. Pick another under Your name.`); return false; }
+      if (r.error === 'bad') { this.fail('name', 'Please pick another name.'); return false; }
+      if (r.pl && !r.error) { this.p = r.pl.p; this.playerName = r.pl.n; players.session(r.pl, m.s); }
+      return true;
+    }
+    if (players.nameState(name).state === 'taken') { this.fail('name', `${name} is another player's name. Reload the page, or pick another name.`); return false; }
+    return true;
+  }
   enter(room, name) {
-    this.room = room; this.name = cleanName(name) || 'Player'; this.id = newId(room); this.state = 'lobby';
+    this.room = room; this.name = this.playerName || cleanName(name) || 'Player'; this.id = newId(room); this.state = 'lobby';
     this.token = randomBytes(12).toString('hex'); tokens.set(this.token, this);
     const peers = [...room.members.values()].map((c) => ({ id: c.id, name: c.name, state: c.state }));
     room.members.set(this.id, this);
@@ -175,6 +196,8 @@ class Client {
       this.json({ t: 'rooms', rooms: [...rooms.values()].filter((r) => r.listed).map(roomInfo) });
     } else if ((m.t === 'create' || m.t === 'hello') && !this.id && badName(cleanName(m.name))) {
       this.fail('name', 'Please pick another name.');
+    } else if ((m.t === 'create' || m.t === 'hello') && !this.id && !this.who(m)) {
+      // refused: who() said why
     } else if (m.t === 'create' && !this.id) {
       if (rooms.size >= LIMIT.rooms) return this.fail('busy', 'The server is full right now. Try again in a few minutes.');
       const room = newRoom(newCode(), m.room || {}, cleanName(m.name) || 'Player', build(m.build));
@@ -216,7 +239,7 @@ class Client {
       const was = this.state;
       this.state = m.state === 'game' ? 'game' : 'lobby';
       if (this.state === 'game' && was !== 'game') this.gameSince = Date.now();
-      if (this.state !== 'game' && was === 'game') { logPlay(this.name, (Date.now() - this.gameSince) / 1000); this.gameSince = 0; }
+      if (this.state !== 'game' && was === 'game') { logPlay(this.name, (Date.now() - this.gameSince) / 1000, this.p); this.gameSince = 0; }
       for (const c of this.room.members.values()) if (c !== this) c.json({ t: 'state', id: this.id, state: this.state });
       roomsChanged();
     } else if (m.t === 'signal' && this.id) {
@@ -244,7 +267,7 @@ class Client {
   adopt(old) {
     clearTimeout(old.awayTimer); old.awayTimer = null;
     tokens.delete(old.token);
-    for (const k of ['id', 'room', 'name', 'rtt', 'state', 'gameSince', 'bin', 'binClient']) this[k] = old[k];
+    for (const k of ['id', 'room', 'name', 'p', 'rtt', 'state', 'gameSince', 'bin', 'binClient']) this[k] = old[k];
     if (this.binClient) this.binClient.binFor = this;
     this.token = randomBytes(12).toString('hex'); tokens.set(this.token, this);
     this.room.members.set(this.id, this);
@@ -254,14 +277,14 @@ class Client {
     const peers = [...this.room.members.values()].filter((c) => c !== this).map((c) => ({ id: c.id, name: c.name, state: c.state }));
     this.json({ t: 'welcome', resumed: true, id: this.id, room: this.room.code, info: roomInfo(this.room), peers, token: this.token });
     console.log(`[relay] ${this.label} resumed ${this.id} (${this.name}) in ${this.room.code} after ${away} ms`);
-    logNet({ ev: 'resume', id: this.id, n: this.name, room: this.room.code, away, state: this.state });
+    logNet({ ev: 'resume', id: this.id, n: this.name, ...(this.p ? { p: this.p } : {}), room: this.room.code, away, state: this.state });
   }
   // the socket dropped without a goodbye: keep the place for a while, for a resume
   away() {
     this.awaySince = Date.now();
     this.awayTimer = setTimeout(() => {
       if (!this.id) return;
-      logNet({ ev: 'gone', id: this.id, n: this.name, room: this.room.code, state: this.state });
+      logNet({ ev: 'gone', id: this.id, n: this.name, ...(this.p ? { p: this.p } : {}), room: this.room.code, state: this.state });
       this.gone();
     }, LIMIT.graceMs);
     this.awayTimer.unref?.();
@@ -269,7 +292,7 @@ class Client {
   gone() {
     if (!this.id) return;
     clearTimeout(this.awayTimer); this.awayTimer = null;
-    if (this.state === 'game' && this.gameSince) logPlay(this.name, (Date.now() - this.gameSince) / 1000);
+    if (this.state === 'game' && this.gameSince) logPlay(this.name, (Date.now() - this.gameSince) / 1000, this.p);
     tokens.delete(this.token); this.token = null; this.bin = null;
     const room = this.room;
     room.members.delete(this.id);
@@ -290,7 +313,7 @@ class Client {
     if (!this.id) return;
     const secs = Math.round((Date.now() - this.opened) / 1000);
     console.log(`[relay] ${this.id} (${this.name}) connection closed: ${why} after ${secs} s`);
-    logNet({ ev: 'close', id: this.id, n: this.name, room: this.room.code, why, secs, state: this.state });
+    logNet({ ev: 'close', id: this.id, n: this.name, ...(this.p ? { p: this.p } : {}), room: this.room.code, why, secs, state: this.state });
     // the browser closing it on purpose (the tab closed or reloaded) is a goodbye; anything else
     // may be the network, so the place is kept for a resume
     if (why.startsWith('closed by the browser')) this.gone(); else this.away();

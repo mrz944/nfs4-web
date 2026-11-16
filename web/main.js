@@ -32,9 +32,54 @@ function flushLog(beacon = false) {
 }
 setInterval(flushLog, 3000);
 
-// page analytics (web/analytics.mjs on our own server: no cookies, no third parties)
+// ------------------------------------------------------------------ player key
+// This browser races as a player (web/players.mjs): 8 words from words.js, made here once and
+// kept in localStorage. The server only ever gets their SHA-256, the token (me.k), with laps,
+// rooms, name changes and page events. The same words on another device are the same player there
+// (setupPlayer: Your Passphrase).
+const PLAYER_STORE = 'nfs4.player';
+const me = { words: '', k: '', p: null, n: '', ready: null };
+const WORD_SET = new Set(WORDS);
+function newWords() {
+  const out = [], r = new Uint16Array(16);
+  while (out.length < 8) { crypto.getRandomValues(r); for (const x of r) if (x < 64800 && out.length < 8) out.push(WORDS[x % WORDS.length]); }   // 64800 = 50 x 1296: no bias
+  return out.join(' ');
+}
+// typed or pasted words, each one maybe cut to its first 3 or more letters (the list tells
+// its words apart by 3)
+function readWords(text) {
+  const words = [];
+  for (const t of String(text || '').toLowerCase().split(/[^a-z-]+/).map((w) => w.replace(/^-+|-+$/g, '')).filter(Boolean)) {
+    if (WORD_SET.has(t)) { words.push(t); continue; }
+    const m = t.length >= 3 ? WORDS.filter((w) => w.startsWith(t)) : [];
+    if (m.length !== 1) return { words, bad: t };
+    words.push(m[0]);
+  }
+  return { words };
+}
+async function tokenOf(words) {
+  const b = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('nfs4 player v1:' + words)));
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+async function setKey(words) {
+  const k = await tokenOf(words);
+  Object.assign(me, { words, k, p: null, n: '' });
+  try { localStorage.setItem(PLAYER_STORE, JSON.stringify({ w: words, k })); } catch {}
+}
+try { const s = JSON.parse(localStorage.getItem(PLAYER_STORE) || 'null'); if (s?.w && /^[0-9a-f]{64}$/.test(s.k)) { me.words = s.w; me.k = s.k; } } catch {}
+me.ready = me.k ? Promise.resolve() : setKey(newWords()).catch(() => {});   // no crypto.subtle (not https): no player
+// the players endpoints (players.mjs); null from a server without them, or when offline
+async function playerApi(path, body) {
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
+  } catch { return null; }
+}
+
+// page analytics (web/analytics.mjs on our own server: no cookies, no third parties); with the
+// player key, so one player's visits can be told apart from another's
 function track(e, d = {}) {
-  const body = JSON.stringify({ e, s: logSession, d });
+  const body = JSON.stringify({ e, s: logSession, d, k: me.k || undefined });
   try { if (!navigator.sendBeacon('__event', body)) fetch('__event', { method: 'POST', body, keepalive: true }).catch(() => {}); } catch {}
 }
 const pageT0 = Date.now();
@@ -50,6 +95,8 @@ window.addEventListener('unhandledrejection', (e) => log('ERROR (promise)', e.re
 
 import { Net } from './net.js';
 import { openWritable, writeFile } from './opfs.js';
+import { WORDS } from './words.js';
+import { raceTracker, sendLateReplay, watchReplay } from './replay-watch.js';
 
 const GAME_DIR = 'nfs4';
 const net = new Net();
@@ -935,6 +982,7 @@ async function start() {
     monitorRunDependencies: (n) => log('[emscripten] pending dependencies:', n),
     onAbort: (what) => { log('ABORT', what); track('error', { kind: 'abort', msg: String(what) }); gameStopped('The game stopped: ' + what); },
     onGameMessage: (t) => { log('ERROR game message:', t); track('error', { kind: 'message', msg: t }); },
+    onLap: reportLap,                                                // each lap the player finishes (game.c)
     onGameExit: (code) => {
       if (code === 0) { log('game quit: back to the start page'); backToPage(); return; }
       log('ERROR game exited, code', code); track('error', { kind: 'exit', msg: 'code ' + code }); gameStopped('The game closed itself (see the log). Reload the page to start again.');
@@ -950,6 +998,8 @@ async function start() {
   mark('wasm');
   if (net.id) { mod.ccall('rt_net_set_node', null, ['string'], [net.id]); net.attach(mod); net.setState('game'); showNetBadge(); }
   startPerfLog(mod);
+  // replays of races with laps on the lap records go there too (replay-watch.js)
+  gameDir().then((dir) => watchReplay({ dir, race: () => races.current, key: () => me.k, log })).catch(() => {});
   // keep the log over the game until frames arrive (always with ?log)
   const keepLog = logWanted();
   $('log').classList.add('overlay'); document.body.appendChild($('log'));
@@ -1099,6 +1149,39 @@ const savedPass = (code) => { try { return sessionStorage.getItem('nfs4.pass.' +
 const savePass = (code, pw) => { try { pw ? sessionStorage.setItem('nfs4.pass.' + code, pw) : sessionStorage.removeItem('nfs4.pass.' + code); } catch {} };
 let gameStarted = false;
 
+// ------------------------------------------------------------------ the player's name
+// "Your name" is the name of this browser's player (players.mjs). While it is typed the server
+// says whose a name is; a change is taken on Enter or when the field is left, and the lap
+// records follow it. A server without players (older) answers nothing: the name then works as
+// before, and no hint shows.
+let playersOn = false;
+const NAME_HINTS = {
+  yours: ['ok', 'Yours, with your lap records.'],
+  free: ['', 'Free: it becomes yours with your first lap or room.'],
+  old: ['ok', 'Has lap records from before: they become yours with it.'],
+  taken: ['bad', "Another player's name. Pick another, or if it's yours, enter your passphrase:"],
+  bad: ['bad', 'Please pick another name.'],
+  limit: ['bad', 'Three name changes a day: try again tomorrow.'],
+  busy: ['bad', 'The server is busy. Try again in a minute.'],
+};
+function nameHint(state, pre = '') {
+  const h = $('name-hint'); if (!h) return;
+  if (!playersOn || !NAME_HINTS[state]) { h.hidden = true; return; }
+  const [cls, text] = NAME_HINTS[state];
+  h.className = 'namehint ' + cls; h.hidden = false;
+  h.replaceChildren(document.createTextNode(`${pre ? pre + ' ' : ''}${text} `), Object.assign(document.createElement('a'), { href: '#player', textContent: 'Use on another device' }));
+}
+// the server's word on our player ({p, n}): the name field follows it
+function playerIs(r, why = '') {
+  if (!r?.p) return;
+  const changed = me.p !== r.p || me.n !== r.n;
+  me.p = r.p; me.n = r.n;
+  const f = $('pname');
+  if (r.n && f && f.value.trim() !== r.n) { f.value = r.n; try { localStorage.setItem('nfs4.name', r.n); } catch {} }
+  if (changed) { log(`player ${r.p} ${r.n}${why ? ` (${why})` : ''}`); document.dispatchEvent(new Event('nfs4-player')); }
+  nameHint('yours');
+}
+
 function setupOnline() {
   const name = $('pname');
   // a name from the start: the saved one, else a random Player1234 (everyone being "Player"
@@ -1110,6 +1193,41 @@ function setupOnline() {
     try { localStorage.setItem('nfs4.name', name.value.trim()); } catch {}
   });
   const myName = () => cleanName(name.value).trim();
+  // whose our name is: asked once at start, then while typing; changed on Enter or leaving the field
+  me.ready.then(async () => {
+    if (!me.k) return;
+    const r = await playerApi('__me', { k: me.k, n: myName(), s: logSession });
+    if (!r) return;
+    playersOn = true;
+    if (r.p) playerIs(r);
+    else nameHint(r.state);
+  });
+  let checkTimer = 0;
+  name.addEventListener('input', () => {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(async () => {
+      const n = myName();
+      if (!playersOn || !n) return;
+      if (me.p && n === me.n) { nameHint('yours'); return; }
+      const r = await fetch('__name?n=' + encodeURIComponent(n), { cache: 'no-store' }).then((x) => x.json()).catch(() => null);
+      if (r && myName() === n) nameHint(r.owner && r.owner === me.p ? 'yours' : r.state);
+    }, 350);
+  });
+  name.addEventListener('change', async () => {
+    const n = myName();
+    if (!playersOn || !me.k || !n || n === me.n) return;
+    clearTimeout(checkTimer);
+    const r = await playerApi('__name', { k: me.k, n, s: logSession });
+    if (!r) return;
+    if (r.error) {
+      log(`name: ${n} not taken (${r.error})`);
+      if (r.p) playerIs(r);          // back to the name the player has (no player yet: the field keeps what was typed)
+      nameHint(r.error, `${n}:`); return;
+    }
+    playerIs(r, 'new name');
+  });
+  // rooms: the relay gets the key too, and plays us under our player's name
+  net.player = () => me.ready.then(() => (me.k ? { k: me.k, s: logSession } : null));
   const needName = () => {
     if (myName()) return false;
     message('Enter your name first.'); name.focus(); return true;
@@ -1243,6 +1361,107 @@ function setupOnline() {
   window.addEventListener('hashchange', () => { const c = roomFromHash(); if (c && c !== net.room && !net.id) joinRoom(c, savedPass(c), c); });
   redraw();
   connect();
+}
+
+// ---------------------------------------------------------------- lap records
+// The runtime reports each lap the player finishes (Module.onLap, runtime/game.c): the track
+// number, flags (FLAG in laps.mjs: backward, mirrored, night, weather), the car's code, the lap,
+// the race's laps and the time in the game's 1/64 s ticks. They go to /__lap (laps.mjs); the
+// start page shows the boards from /__laps.
+// the game's track numbers: its track folders in the order of its table at 0x5ba21c, named as
+// in data/text/text.eng
+const TRACKS = ['Celtic Ruins', 'Landstrasse', 'Dolphin Cove', 'Kindiak Park', 'Route Adonf', 'Durham Road', 'Snowy Ridge', 'Raceway', 'Raceway 2', 'Raceway 3',
+  'Hometown', 'Redrock Ridge', 'Atlantica', 'Rocky Pass', 'Country Woods', 'Lost Canyons', 'Aquatica', 'Summit', 'Empire City'];
+// car folders (data/cars) and their names (fedata.eng in each car.viv)
+const CARS = {
+  b911: 'Bonus Porsche 911 Turbo', bcam: 'Bonus Chevrolet Camaro', bmw5: 'BMW M5', bz3r: 'BMW Z3', ccam: 'Chevrolet Camaro', ccor: 'Chevrolet Corvette',
+  elni: 'La Niña', ff50: 'Ferrari F50', fm50: 'Ferrari 550 Maranello', jxkr: 'Jaguar XKR', knoc: 'Knockout', ldia: 'Lamborghini Diablo SV',
+  mcf1: 'McLaren F1 GTR', mclk: 'Mercedes CLK-GTR', mslk: 'Mercedes SLK 230', p911: 'Porsche 911 Turbo', pbmw: 'Pursuit BMW M5', pcam: 'Pursuit Camaro',
+  pcor: 'Pursuit Corvette', pdia: 'Pursuit Diablo SV', peln: 'Pursuit La Niña', pfir: 'Pontiac Firebird', pp91: 'Pursuit Porsche 911 Turbo',
+};
+const LAP_TAGS = [[2, 'MIR', 'mirrored'], [4, 'NGT', 'night'], [8, 'WTH', 'weather']];
+const DEFAULT_TRACK = '0';
+const trackName = (t) => TRACKS[t] || `Track ${t + 1}`;
+const carName = (c) => CARS[c] || String(c).toUpperCase();
+const lapTime = (t) => `${Math.floor(t / 3840)}:${String(Math.floor(t / 64) % 60).padStart(2, '0')}.${String(Math.floor((t % 64) * 100 / 64)).padStart(2, '0')}`;
+let gameHere = false;          // the game files are in this browser (refresh() in init)
+const races = raceTracker();      // each lap's race, for its replay (replay-watch.js)
+function reportLap(track, flags, code, lap, laps, ticks) {
+  const car = String.fromCharCode(code & 255, (code >>> 8) & 255, (code >>> 16) & 255, code >>> 24).replace(/\0[^]*$/, '').toLowerCase();
+  log(`lap ${lap}/${laps}: ${lapTime(ticks)} on ${trackName(track)}${flags & 1 ? ' backward' : ''} in the ${carName(car)}`);
+  const n = cleanName($('pname')?.value).trim();
+  if (!n) return;
+  const race = races.forLap(track, flags, lap, laps);
+  // with the player key: the lap is the player's, under its name on the server (players.mjs)
+  fetch('__lap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+    body: JSON.stringify({ n, k: me.k || undefined, s: logSession, race: race.id, track, f: flags & 15, car, lap, laps, ticks, b: buildInfo?.built || '' }) })
+    .then(async (r) => {
+      const d = await r.json().catch(() => null);
+      if (!r.ok) { log(`lap records: not sent (${d?.error === 'taken' ? `${n} is another player's name` : d?.error || r.status})`); return; }
+      if (d?.p) { playerIs(d); race.sent++; }
+      if (d?.best) log('lap records: a new best lap for', d?.n || n);
+    }).catch(() => {});
+}
+function setupLaps() {
+  const sel = $('laps-track');
+  let data = null, dir = 'f', want = DEFAULT_TRACK;
+  try { want = localStorage.getItem('nfs4.lapsTrack') || want; dir = localStorage.getItem('nfs4.lapsDir') === 'b' ? 'b' : 'f'; } catch {}
+  for (const b of $('laps-dir').children) b.classList.toggle('on', b.dataset.d === dir);
+  const board = (t, d) => data?.boards?.[`${t}:${d}`] || [];
+  function options() {
+    const ids = new Set(TRACKS.map((_, i) => i));
+    for (const k of Object.keys(data?.boards || {})) ids.add(Number(k.split(':')[0]));
+    sel.replaceChildren(...[...ids].sort((a, b) => a - b).map((i) => {
+      const n = board(i, 'f').length + board(i, 'b').length;
+      return el('option', { value: String(i), textContent: trackName(i) + (n ? `  (${n})` : '') });
+    }));
+    sel.value = ids.has(Number(want)) ? want : DEFAULT_TRACK;
+  }
+  function draw() {
+    // our row: by player id (players.mjs), or by name for a server without players
+    const myName = cleanName($('pname')?.value).trim(), rows = board(sel.value, dir);
+    const mine = (r) => (me.p ? r.p === me.p : r.n === myName);
+    const age = (t) => { const d = Math.floor((Date.now() - t) / 864e5); return d < 1 ? 'today' : d === 1 ? 'yesterday' : d < 60 ? `${d} days ago` : new Date(t).toLocaleDateString(); };
+    $('laps-list').replaceChildren(...(rows.length ? rows.map((r, i) => el('li', { className: mine(r) ? 'me' : '' },
+      el('span', { className: 'r', textContent: i + 1 }), el('span', { className: 'n', textContent: r.n }),
+      el('span', { className: 'tm', textContent: lapTime(r.ticks) }),
+      el('span', { className: 'c', textContent: carName(r.car), title: age(r.t) }, ...LAP_TAGS.filter(([b]) => r.f & b).map(([, t, title]) => el('span', { className: 'ltag', textContent: t, title })),
+        ...(r.rp ? [el('a', { className: 'rpl', href: `__replay/${r.rp}.rp4`, textContent: '▶ replay', title: `The game's replay of ${r.n}'s race: this was lap ${r.lap}${r.laps ? ` of ${r.laps}` : ''}`, onclick: (e) => takeReplay(e, r) })] : []))))
+      : [el('li', { className: 'muted', textContent: `No laps on ${trackName(Number(sel.value))} ${dir === 'b' ? 'backward' : 'forward'} yet. Finish one and it shows here.` })]));
+    const names = new Set(); for (const b of Object.values(data?.boards || {})) for (const r of b) names.add(r.p || 'n:' + r.n.toLowerCase());
+    $('laps-count').textContent = names.size ? `${names.size} racer${names.size === 1 ? '' : 's'}` : 'no laps yet';
+  }
+  // a replay into the game (savedata/Saves, where its Load > Replays list looks), or a download
+  // when the game isn't in this browser yet
+  async function takeReplay(e, r) {
+    if (!gameHere) return;                                          // no game in this browser: the link downloads it
+    e.preventDefault();
+    const note = $('laps-note');
+    const name = `${r.n.replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 10).trim() || 'Racer'} ${(TRACKS[Number(sel.value)] || 'Track').replace(/\W/g, '').slice(0, 3).toUpperCase()}${dir === 'b' ? ' R' : ''}`;
+    try {
+      const res = await fetch(`__replay/${r.rp}.rp4`);
+      if (!res.ok) throw new Error(res.status);
+      const game = await gameDir(), savedata = (await ciDir(game, 'savedata')) || await game.getDirectoryHandle('savedata', { create: true });
+      const saves = (await ciDir(savedata, 'saves')) || await savedata.getDirectoryHandle('Saves', { create: true });
+      await writeFile(saves, name + '.rp4', await res.arrayBuffer());
+      note.replaceChildren(`${r.n}'s race is in your game as "${name}": Start Game, then Load › Replays. Their best lap was lap ${r.lap}${r.laps ? ` of ${r.laps}` : ''}. `,
+        el('a', { href: `__replay/${r.rp}.rp4`, download: name + '.rp4', textContent: 'Download the file' }), ' for the PC game (its SaveData\\Saves folder).');
+      log(`replay: race ${r.rp} saved to the game as savedata/Saves/${name}.rp4`);
+    } catch (err) { note.textContent = `The replay couldn't be loaded (${err.message}). Try again in a moment.`; }
+    note.hidden = false;
+  }
+  sel.onchange = () => { want = sel.value; try { localStorage.setItem('nfs4.lapsTrack', want); } catch {} draw(); };
+  $('laps-dir').onclick = (e) => {
+    const d = e.target.dataset?.d; if (!d) return;
+    dir = d; try { localStorage.setItem('nfs4.lapsDir', dir); } catch {}
+    for (const b of $('laps-dir').children) b.classList.toggle('on', b === e.target);
+    draw();
+  };
+  $('pname')?.addEventListener('input', () => data && draw());
+  document.addEventListener('nfs4-player', () => poll());       // a new name or another player: fresh boards
+  const poll = () => fetch('__laps', { cache: 'no-store' }).then((r) => r.ok && r.json()).then((d) => { if (d) { data = d; options(); draw(); } }).catch(() => {});
+  options(); draw(); poll();
+  setInterval(() => { if (!gameStarted) poll(); }, 60000);
 }
 
 // ---------------------------------------------------------------- activity
@@ -1388,12 +1607,95 @@ function oneTab() {
   });
 }
 
+// Your Passphrase (#player): this browser's 8 words, to copy, download or keep in the browser's
+// passwords, and the words of another device to race as that player here (players.mjs).
+function setupPlayer() {
+  const dlg = $('player');
+  if (!dlg) return;
+  const msg = (t, ok = false) => { $('pl-msg').textContent = t || ''; $('pl-msg').hidden = !t; $('pl-msg').className = 'msg' + (ok ? ' ok' : ''); };
+  const note = (t) => { $('pl-note').textContent = t || ''; $('pl-note').hidden = !t; };
+  const name = () => me.n || cleanName($('pname')?.value).trim() || 'Player';
+  function draw() {
+    $('pl-words').textContent = me.words || '(this browser can\'t keep a passphrase: it needs https and site storage)';
+    $('pl-name').textContent = name();
+    $('pl-bring-l').hidden = !me.p;
+    $('pl-bring-t').textContent = `Bring this browser's lap records along (as ${name()})`;
+    $('pl-save').hidden = !window.PasswordCredential;
+  }
+  async function open() {
+    msg(''); note(''); $('pl-in').value = ''; $('pl-read').textContent = '';
+    if (!dlg.open) { try { dlg.showModal(); } catch { dlg.setAttribute('open', ''); } }
+    await me.ready; draw();
+    // the words only work on another device once the player is on the server
+    if (!me.p && me.k) {
+      const r = await playerApi('__name', { k: me.k, n: cleanName($('pname')?.value).trim(), s: logSession });
+      if (r?.p) { playerIs(r); draw(); }
+      else if (r?.error === 'taken') msg(`${cleanName($('pname')?.value).trim()} is another player's name: pick your own under Your name first, or enter the passphrase of the player it is.`);
+    }
+  }
+  const text = () => `nfs4.xyz passphrase of ${name()}\n\n${me.words}\n\nOn another phone or computer: nfs4.xyz > Online Play > Your name > Use on another device, then enter these words to race there as ${name()}, with your lap records.\nKeep them to yourself: anyone who has them can race as you.\n`;
+  $('pl-copy').onclick = () => navigator.clipboard?.writeText(me.words).then(() => note('Copied.'), () => note('Copying didn\'t work here: select the words and copy them.'));
+  $('pl-download').onclick = () => {
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text()], { type: 'text/plain' })), download: 'nfs4-passphrase.txt' });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  // Chrome, Edge: into the browser's own passwords, which sync to the player's other devices
+  $('pl-save').onclick = async () => {
+    try { await navigator.credentials.store(new window.PasswordCredential({ id: name(), name: name(), password: me.words })); note('Saved in the browser\'s passwords (if it asked, and you said yes).'); }
+    catch (e) { note(`The browser didn't save it (${e.name}). Copy the words instead.`); }
+  };
+  $('pl-in').addEventListener('input', () => {
+    const r = readWords($('pl-in').value);
+    $('pl-read').className = 'muted' + (r.bad ? ' bad' : '');
+    $('pl-read').textContent = r.bad ? `"${r.bad}" is not one of the passphrase words.` : r.words.length ? `${r.words.length} of 8: ${r.words.join(' ')}` : '';
+  });
+  $('pl-use').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const r = readWords($('pl-in').value);
+    if (r.bad || r.words.length !== 8) { msg(r.bad ? `"${r.bad}" is not one of the passphrase words.` : `That's ${r.words.length} words: a passphrase has 8.`); return; }
+    const words = r.words.join(' ');
+    if (words === me.words) { msg('That is this browser\'s own passphrase.'); return; }
+    const k = await tokenOf(words);
+    const who = await playerApi('__me', { k, s: logSession });
+    if (!who) { msg('The server didn\'t answer. Try again in a moment.'); return; }
+    if (!who.p) { msg('No player has this passphrase. Check the words.'); return; }
+    const bring = me.p && me.p !== who.p && $('pl-bring').checked, was = name();
+    if (bring) {
+      const m = await playerApi('__merge', { k, from: me.k, s: logSession });
+      if (!m?.p) { msg('Bringing the lap records along didn\'t work. Try again in a moment.'); return; }
+    }
+    await setKey(words);
+    playerIs(who, `passphrase from another device${bring ? `, with the lap records of ${was}` : ''}`);
+    draw(); $('pl-in').value = ''; $('pl-read').textContent = '';
+    msg(`This browser now races as ${who.n}${bring ? `, with ${was}'s lap records` : ''}.`, true);
+  });
+  $('pl-forget').addEventListener('click', async (e) => {
+    e.preventDefault();
+    if (!me.k || !confirm(`Delete ${name()}? Its name and lap records go from the server, here and on every device with this passphrase. This can't be undone.`)) return;
+    const r = await playerApi('__forget', { k: me.k });
+    if (!r?.ok) { msg('The server didn\'t answer. Try again in a moment.'); return; }
+    log(`player ${me.p || '-'} deleted`);
+    await setKey(newWords());
+    document.dispatchEvent(new Event('nfs4-player'));
+    nameHint('free'); draw(); msg('Deleted. This browser has a new passphrase.', true);
+  });
+  $('player-close').addEventListener('click', () => dlg.close());
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+  dlg.addEventListener('close', () => { if (location.hash === '#player') history.replaceState(null, '', location.pathname + location.search); });
+  document.addEventListener('click', (e) => { const a = e.target.closest?.('a[href="#player"]'); if (a) { e.preventDefault(); open(); } });
+  const fromHash = () => { if (location.hash === '#player') open(); };
+  window.addEventListener('hashchange', fromHash);
+  fromHash();
+}
+
 async function init() {
   setupLogToggle();
   $('tip').textContent = TIPS[Math.floor(Math.random() * TIPS.length)];
   setupOnline();
   setupActivity();
+  setupLaps();
   setupChangelog('nfs4.');
+  setupPlayer();
   setupSettings();
   watchPads();
   showHomeScreenCard();
@@ -1433,6 +1735,7 @@ async function init() {
   log('build', buildInfo.built || '?');
   const refresh = async () => {
     const ok = await hasGame();
+    gameHere = ok;
     $('pick-label').hidden = ok; $('start').hidden = !ok; $('forget').hidden = !ok;
     status(ok ? 'Game files are stored in this browser. Ready.' : 'Choose your NFS4 folder: NFS: High Stakes with the Modern Patch (beta) installed, the one with nfs4.exe, data and savedata.');
   };
@@ -1468,5 +1771,7 @@ async function init() {
     if (settings.fullscreen && fsSupported() && !fsElement()) toggleFullscreen();   // only allowed inside the click
     start().catch((e) => { console.error(e); status('Failed to start: ' + e.message, true); $('start').disabled = false; }); });
   await refresh();
+  // the last race's replay, if it never went with its laps (replay-watch.js)
+  if (gameHere) me.ready.then(async () => sendLateReplay({ dir: await gameDir(), key: () => me.k, log })).catch(() => {});
 }
 init();
