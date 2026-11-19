@@ -44,10 +44,15 @@ function tries(h) {
 // When the page opens: the replay of the last race, if it never went to the server (its laps were
 // all refused, or the page was closed first). The server finds its race by the file's time
 // (replays.mjs lateRace). Offered once: kept or not, it isn't offered again.
-export async function sendLateReplay({ dir, key, skip = () => false, log = () => {} }) {
+// lapAt(): when the server last took a lap from this browser. The server only takes a replay
+// whose race had laps on the lap records, ending 10 minutes after the file's time at most or 15
+// before it, so without such a lap the replay isn't offered (it was asked on most page loads).
+export async function sendLateReplay({ dir, key, skip = () => false, lapAt = () => Infinity, log = () => {} }) {
   try {
     const f = await readReplay(dir);
     if (!(await isReplay(f)) || skip() || !key()) return;
+    const gap = f.lastModified - lapAt();
+    if (!(gap > -10 * 60e3 && gap < 15 * 60e3)) return;
     const h = await digest(f);
     if (sent().includes(h)) return;
     const res = await fetch(`__replay?race=late&at=${Math.round(f.lastModified)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'x-player-key': key() }, body: await f.arrayBuffer() });

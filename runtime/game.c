@@ -16,6 +16,13 @@
  * (Module.onLap), and to the log. Checked natively: offline (all settings), and online with two
  * instances (the host reports car 0's laps, the client car 1's).
  *
+ * Not while a replay plays (Load > Replays, or Replay after a race): the cars drive their
+ * recorded race again, laps and all, and a downloaded record's replay would land on the board
+ * as the watcher's own time. The replay state is in the settings block (REPLAY_STATE, +0xfe0):
+ * the replay loader sets it to 2 once a replay file loads (0x512723; also 0x8290a0), and the
+ * code tests it for 2 and above; 0 in a race and in the menus (0x4c2aab, 0x4c2c1a). Seen in
+ * MEMDUMPs: 0 in the menus and in a race, 2 while a saved replay plays.
+ *
  * RT_AUTOPILOT=1 (native tests only): the first human's car is driven by the game's AI (its
  * control routine and kind), so a scripted race finishes with real laps. Its replay has no
  * recording: the human control routine is what records the player's car. */
@@ -40,6 +47,7 @@
 #define KIND_AI 11u
 #define KIND_REMOTE 0x200u
 #define MAX_LAPS 16
+#define REPLAY_STATE 0x7c4be4u            /* 2 (and above): a replay plays */
 
 static uint32_t car_ptr(int k) {
     uint32_t p = RD32(CAR_TABLE + 4u * (uint32_t)k);
@@ -79,12 +87,17 @@ static uint32_t local_car(void) {
 
 static void lap_watch(void) {
     static uint32_t seen_car; static int done;               /* laps of seen_car already reported */
+    uint32_t rs = RD32(REPLAY_STATE);
+    static uint32_t rs_was;
+    if ((rs >= 2) != (rs_was >= 2)) rt_log("game: %s", rs >= 2 ? "a replay plays: its laps aren't the player's" : "the replay is over");
+    rs_was = rs;
     uint32_t car = local_car();
     if (!car) return;
     int n = (int)RD32(car + CAR_LAPS);
     if (n < 0 || n > 64) return;
     if (car != seen_car) { seen_car = car; done = n; return; }   /* laps from before: not now */
     if (n < done) done = n;                                    /* a new race, or a restart */
+    if (rs >= 2) { done = n; return; }                         /* a replay: its laps were driven before */
     while (done < n && done < MAX_LAPS) {
         uint32_t ticks = RD32(car + CAR_LAP_TIMES + 4u * (uint32_t)done);
         if (!ticks) break;                                     /* written a moment later */

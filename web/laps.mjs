@@ -16,6 +16,9 @@
 // game's replay of that race comes in, the boards link it on that race's laps (rp, lap, laps).
 // Laps driven with mods on never get here (the page doesn't send them). The page sends them,
 // so a determined cheat can post anything: the checks below only keep out nonsense.
+// A replay played in the game isn't a race: builds before 2026-11-18 sent its laps as the
+// watcher's (runtime/game.c now doesn't). A race whose every lap is, to the tick, the same lap of
+// an earlier race (same track, settings and car) is such a replay, and doesn't count (copies).
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { badName, cleanName, clientIp, foreignOrigin } from './relay.mjs';
@@ -30,12 +33,34 @@ export function createLaps(dir, players) {
   const laps = [];                    // every lap, oldest first
   const legacy = new Map();           // folded name -> laps from before player keys under it
   const races = new Map();            // race id -> its laps
+  const sameLap = new Map();          // "track:f:car:lap:ticks" -> the races with that lap
+  const copies = new Map();           // race id -> the earlier race it is a replay of
   const api = { hasReplay: () => false };   // replays.mjs: is there a replay of this race?
   let cache = null, cacheFor = '', json = null;
 
+  const lapKey = (r) => `${r.track}:${r.f & 31}:${r.car}:${r.lap}:${r.ticks}`;
+  // the earlier race whose laps a race's laps all are (a replay of it), or null
+  function copyOf(id) {
+    const own = races.get(id), first = own[0];
+    for (const q of sameLap.get(lapKey(first)) || []) {
+      const qs = races.get(q);
+      if (q === id || qs[0].t >= first.t) continue;
+      const at = new Map(qs.map((r) => [r.lap, r.ticks]));
+      if (own.every((r) => at.get(r.lap) === r.ticks)) return q;   // same track, settings, car: by the key
+    }
+    return null;
+  }
   function keep(r) {
     laps.push(r);
-    if (r.race) { if (!races.has(r.race)) races.set(r.race, []); races.get(r.race).push(r); }
+    if (r.race) {
+      if (!races.has(r.race)) races.set(r.race, []);
+      races.get(r.race).push(r);
+      const k = lapKey(r);
+      if (!sameLap.has(k)) sameLap.set(k, []);
+      sameLap.get(k).push(r.race);
+      const q = copyOf(r.race);
+      if (q) copies.set(r.race, q); else copies.delete(r.race);
+    }
     if (!r.p) { const f = foldName(r.n); legacy.set(f, (legacy.get(f) || 0) + 1); }
   }
   for (const f of readdirSync(dir).filter((f) => /^laps-.*\.jsonl$/.test(f)).sort()) {
@@ -60,6 +85,7 @@ export function createLaps(dir, players) {
     if (cache && cacheFor === stamp) return cache;
     const b = new Map();
     for (const r of laps) {
+      if (r.race && copies.has(r.race)) continue;
       const o = owner(r); if (!o) continue;
       const key = `${r.track}:${r.f & FLAG.backward ? 'b' : 'f'}`;
       if (!b.has(key)) b.set(key, new Map());
@@ -112,7 +138,9 @@ export function createLaps(dir, players) {
       const o = owner(r), had = o && boards().get(`${r.track}:${r.f & FLAG.backward ? 'b' : 'f'}`)?.get(o);
       try { appendFileSync(join(dir, `laps-${new Date().toISOString().slice(0, 7)}.jsonl`), JSON.stringify(r) + '\n'); } catch (e) { console.log('[laps] write failed:', e.message); }
       keep(r);
-      send(200, { best: !had || r.ticks < had.r.ticks, ...(p ? { p, n } : {}) });
+      const copy = race && copies.get(race);
+      if (copy) console.log(`[laps] ${n}: race ${race} is a replay of race ${copy} (lap ${r.lap}), not counted`);
+      send(200, { best: !copy && (!had || r.ticks < had.r.ticks), ...(p ? { p, n } : {}) });
     });
   }
 
