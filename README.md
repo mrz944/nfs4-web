@@ -168,7 +168,10 @@ Its Players section looks up one player; `node tools/players.mjs` (`who`, `list`
 Each browser gets a player key, 8 words that are never shown unless you ask; the server stores only a hash of them.
 The key owns your name, so your laps go with it, and the same 8 words on another device make you the same racer there (*Online Play › Your name › Use on another device*).
 After every race that isn't online, the game's own replay of it (`replay.rp4`) goes up with the laps, and **▶ replay** on a best lap puts it into your game under *Load › Replays*.
+Laps from a replay playing in the game don't count.
 `?icetest` in the page URL logs what each STUN and TURN server gives this browser, for players whose online links never come up.
+`?audiorate=native` (remembered; `?audiorate=44100` goes back) runs the sound at the device's own rate, with the page converting instead of the browser.
+Online rooms show each player's country flag, from Cloudflare's `CF-IPCountry` (Twemoji Country Flags font, CC-BY 4.0, in `web/fonts`).
 How it all fits together: [ARCHITECTURE.md](ARCHITECTURE.md). Public hosting: [docs/cloudflare.md](docs/cloudflare.md).
 
 ### Native test helpers

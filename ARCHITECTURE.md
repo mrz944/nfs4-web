@@ -139,6 +139,11 @@ those records led to their pointer table.
   with a copy of that settings block (0x18a4 bytes, its first word). Load › Replays lists
   `SaveData\Saves\*.rp4`. The page uploads `replay.rp4` after a race whose laps it sent, and
   puts a record's replay into `savedata/Saves`.
+- A replay playing (Load › Replays, or Replay after a race) isn't a race: its cars drive their
+  laps again. The replay state is `0x7c4be4` (settings block `+0xfe0`): the replay loader sets it
+  to 2 when a replay file loads (`0x512723`), 0 in a race and in the menus. No laps are sent
+  while it is 2 or more. The server also drops a race whose every lap equals, to the tick, an
+  earlier race's lap with the same track, settings and car (a replay sent by an older build).
 - Checked natively with `RT_AUTOPILOT=1` (the game's AI drives the player's car): laps, track
   and all four flags offline, and online with two instances. An autopilot race's replay has no
   recording (the human control routine records the player's car), so playing a real replay back
