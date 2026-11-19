@@ -48,7 +48,9 @@ static DirC **dir_slot(const char *dir, size_t len) {
     return pp;
 }
 /* a host path was created, removed or renamed: re-read its folder (and itself, if a folder) */
+static void fs_wrote(void);
 void fs_changed(const char *hp) {
+    fs_wrote();
     const char *sl = strrchr(hp, '/');
     pthread_mutex_lock(&dir_mu);
     DirC *c = *dir_slot(hp, strlen(hp)); if (c) c->valid = 0;
@@ -158,7 +160,42 @@ static int rel_dir(const char *gp, char *out, size_t n) {
 
 /* ------------------------------------------------------------ files */
 static uint32_t set_event(uint32_t h, int sig, int pulse);
-typedef struct { int fd; char path[1024]; } File;
+/* Files opened only for reading are read through a 64 KB buffer, at a position kept here (the
+ * fd's own stays unused). In the browser every read is a trip to the storage thread (WasmFS's
+ * OPFS backend), and a game reads in small pieces: thousands of ReadFile calls froze a slow
+ * phone for 5 s in NFS3 Web. A buffer is dropped when anything writes a file (fs_gen). Threads
+ * can share a handle (Windows takes their reads in turn): each file has its own lock. */
+#define RBUF 65536
+typedef struct { int fd; char path[1024]; int ro; int64_t pos, bpos; uint32_t blen, gen; uint8_t *buf; pthread_mutex_t mu; } File;
+static uint32_t fs_gen;
+static void fs_wrote(void) { __atomic_add_fetch(&fs_gen, 1, __ATOMIC_ACQ_REL); }
+static ssize_t ro_read_locked(File *f, uint8_t *dst, uint32_t n) {
+    uint32_t g = __atomic_load_n(&fs_gen, __ATOMIC_ACQUIRE);
+    if (f->gen != g) { f->blen = 0; f->gen = g; }
+    ssize_t got = 0;
+    while (n) {
+        if (f->blen && f->pos >= f->bpos && f->pos < f->bpos + f->blen) {
+            uint32_t k = (uint32_t)(f->bpos + f->blen - f->pos); if (k > n) k = n;
+            memcpy(dst, f->buf + (f->pos - f->bpos), k);
+            f->pos += k; dst += k; n -= k; got += k; continue;
+        }
+        if (n >= RBUF / 2) {                               /* big reads go straight in */
+            ssize_t r = pread(f->fd, dst, n, f->pos);
+            if (r < 0) return got ? got : -1;
+            f->pos += r; got += r; break;
+        }
+        if (!f->buf && !(f->buf = malloc(RBUF))) { ssize_t r = pread(f->fd, dst, n, f->pos); if (r < 0) return got ? got : -1; f->pos += r; return got + r; }
+        ssize_t r = pread(f->fd, f->buf, RBUF, f->pos);
+        f->blen = 0;
+        if (r < 0) return got ? got : -1;
+        if (r == 0) break;                                 /* end of file */
+        f->bpos = f->pos; f->blen = (uint32_t)r;
+    }
+    return got;
+}
+static ssize_t ro_read(File *f, uint8_t *dst, uint32_t n) {
+    pthread_mutex_lock(&f->mu); ssize_t r = ro_read_locked(f, dst, n); pthread_mutex_unlock(&f->mu); return r;
+}
 
 static int is_nul_device(const char *p) {
     const char *b = p;
@@ -193,10 +230,13 @@ static uint32_t k_CreateFileA(CPU *c, const uint32_t *a) {
     if (fd >= 0 && !found && (fl & O_CREAT)) fs_changed(hp);
     if (fd < 0 && is_nul_device(gp)) fd = open("/tmp/rt-nul", O_RDWR | O_CREAT | O_TRUNC, 0644);  /* no /dev/null */
     if (fd < 0) {
-        if (rt_verbose) rt_log("CreateFileA(%s) -> not found (%s)", gp, hp);
+        if (rt_verbose) rt_log("CreateFileA(%s) -> not found (%s: %s)", gp, hp, strerror(errno));
         tls_lasterr = ERROR_FILE_NOT_FOUND; return INVALID_HANDLE;
     }
+    if (fl != O_RDONLY) fs_wrote();                       /* opened to write (maybe truncated): other handles' buffers go */
     File *f = calloc(1, sizeof *f); f->fd = fd; snprintf(f->path, sizeof f->path, "%s", hp);
+    f->ro = fl == O_RDONLY && strcmp(hp, "/dev/null");
+    if (f->ro) pthread_mutex_init(&f->mu, NULL);
     uint32_t h = handle_new(H_FILE, f);
     if (rt_verbose > 1) rt_log("CreateFileA(%s) -> %#x", gp, h);
     return h;
@@ -210,7 +250,7 @@ static File *getfile(uint32_t h) {
 }
 static uint32_t k_ReadFile(CPU *c, const uint32_t *a) {
     File *f = getfile(A(0)); if (!f) return 0;
-    off_t pos = lseek(f->fd, 0, SEEK_CUR);
+    off_t pos = f->ro ? (off_t)__atomic_load_n(&f->pos, __ATOMIC_RELAXED) : lseek(f->fd, 0, SEEK_CUR);   /* for the log */
     ssize_t n;
     uint32_t ov = A(4);
     if (ov) {   /* OVERLAPPED: Internal@0 InternalHigh@4 Offset@8 OffsetHigh@12 hEvent@16; completed synchronously */
@@ -218,7 +258,7 @@ static uint32_t k_ReadFile(CPU *c, const uint32_t *a) {
         n = pread(f->fd, G + A(1), A(2), pos);
         WR32(ov, 0); WR32(ov + 4, n < 0 ? 0 : (uint32_t)n);
         if (RD32(ov + 16)) set_event(RD32(ov + 16), 1, 0);
-    } else n = read(f->fd, G + A(1), A(2));
+    } else n = f->ro ? ro_read(f, G + A(1), A(2)) : read(f->fd, G + A(1), A(2));
     if (A(3)) WR32(A(3), n < 0 ? 0 : (uint32_t)n);
     { extern volatile uint64_t g_io_read_bytes, g_io_reads; if (n > 0) g_io_read_bytes += (uint64_t)n; g_io_reads++; }
     if (rt_verbose >= 3) rt_log("ReadFile(h=%#x %s @%ld, %u bytes -> %#x, ov=%#x) = %zd", A(0), f->path, (long)pos, A(2), A(1), A(4), n);
@@ -227,6 +267,7 @@ static uint32_t k_ReadFile(CPU *c, const uint32_t *a) {
 static uint32_t k_WriteFile(CPU *c, const uint32_t *a) {
     File *f = getfile(A(0)); if (!f) return 0;
     ssize_t n = write(f->fd, G + A(1), A(2));
+    if (f->fd > 2) fs_wrote();
     if (A(3)) WR32(A(3), n < 0 ? 0 : (uint32_t)n);
     return n >= 0;
 }
@@ -234,7 +275,16 @@ static uint32_t k_SetFilePointer(CPU *c, const uint32_t *a) {
     File *f = getfile(A(0)); if (!f) return INVALID_HANDLE;
     int64_t off = (int32_t)A(1);
     if (A(2)) off = (int64_t)(((uint64_t)RD32(A(2)) << 32) | A(1));
-    off_t r = lseek(f->fd, off, A(3) == 0 ? SEEK_SET : A(3) == 1 ? SEEK_CUR : SEEK_END);
+    off_t r;
+    if (f->ro) {
+        int64_t base = 0;
+        if (A(3) == 2) { struct stat st; base = fstat(f->fd, &st) ? 0 : st.st_size; }
+        pthread_mutex_lock(&f->mu);
+        if (A(3) == 1) base = f->pos;
+        r = base + off < 0 ? (off_t)-1 : (off_t)(base + off);
+        if (r >= 0) f->pos = r; else tls_lasterr = 131;   /* ERROR_NEGATIVE_SEEK */
+        pthread_mutex_unlock(&f->mu);
+    } else r = lseek(f->fd, off, A(3) == 0 ? SEEK_SET : A(3) == 1 ? SEEK_CUR : SEEK_END);
     if (rt_verbose >= 3) rt_log("SetFilePointer(h=%#x %s, %lld, %u) = %lld", A(0), f->path, (long long)off, A(3), (long long)r);
     if (A(2)) WR32(A(2), (uint32_t)((uint64_t)r >> 32));
     return (uint32_t)r;
@@ -253,7 +303,8 @@ static uint32_t k_GetFileType(CPU *c, const uint32_t *a) {
 }
 static uint32_t k_SetEndOfFile(CPU *c, const uint32_t *a) {
     File *f = getfile(A(0)); if (!f) return 0;
-    off_t p = lseek(f->fd, 0, SEEK_CUR); return ftruncate(f->fd, p) == 0;
+    if (f->ro) { tls_lasterr = 5; return 0; }              /* ERROR_ACCESS_DENIED, as on Windows */
+    off_t p = lseek(f->fd, 0, SEEK_CUR); int ok = ftruncate(f->fd, p) == 0; fs_wrote(); return ok;
 }
 static uint32_t k_GetOverlappedResult(CPU *c, const uint32_t *a) {
     if (A(2)) WR32(A(2), RD32(A(1) + 4));
@@ -423,7 +474,7 @@ static Waitable *get_waitable(uint32_t h) {
 static uint32_t k_CloseHandle(CPU *c, const uint32_t *a) {
     int t = handle_type(A(0));
     if (t == H_EVENT || t == H_MUTEX) ev("close", A(0), (uint32_t)t);
-    if (t == H_FILE) { File *f = handle_get(A(0), H_FILE); close(f->fd); free(f); }
+    if (t == H_FILE) { File *f = handle_get(A(0), H_FILE); close(f->fd); if (f->ro) pthread_mutex_destroy(&f->mu); free(f->buf); free(f); }
     if (t != H_THREAD && t != H_NONE) handle_close(A(0));
     return 1;
 }
