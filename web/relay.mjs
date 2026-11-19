@@ -93,6 +93,17 @@ export function clientIp(req) {
   const fwd = loop && (req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim());
   return String(fwd || a).slice(0, 64);
 }
+// The client's country (two letters, for the flag in rooms): Cloudflare's CF-IPCountry header,
+// trusted only behind the tunnel like the address. '' when unknown (XX), over Tor (T1) or local.
+let ccSeen = false;
+export function clientCountry(req) {
+  const a = req.socket.remoteAddress || '';
+  if (!(a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1')) return '';
+  const h = req.headers['cf-ipcountry'];
+  if (!ccSeen && req.headers['cf-connecting-ip']) { ccSeen = true; console.log(`[relay] visitor countries from Cloudflare: ${h ? 'yes' : 'no (turn on IP Geolocation in the Cloudflare dashboard)'}`); }
+  const c = String(h || '').toUpperCase();
+  return /^[A-Z]{2}$/.test(c) && c !== 'XX' && c !== 'T1' ? c : '';
+}
 // Browser requests from another site's page: refused (non-browser clients send no Origin).
 export function foreignOrigin(req) {
   const o = req.headers.origin;
@@ -127,7 +138,7 @@ function newId(room) {
 const roomInfo = (r) => ({
   code: r.code, name: r.name, host: r.owner, locked: !!r.pass, max: r.max, created: r.created,
   racing: [...r.members.values()].some((c) => c.state === 'game'),
-  players: [...r.members.values()].map((c) => ({ name: c.name, rtt: c.rtt, state: c.state, ...(c.p ? { p: c.p } : {}) })),
+  players: [...r.members.values()].map((c) => ({ name: c.name, rtt: c.rtt, state: c.state, ...(c.p ? { p: c.p } : {}), ...(c.cc ? { cc: c.cc } : {}) })),
 });
 
 // room browser updates: soon after any change, and every few seconds for the pings
@@ -144,7 +155,7 @@ setInterval(pushRooms, 4000).unref();
 class Client {
   constructor(sendText, sendBin, close, label) {
     this.sendText = sendText; this.sendBin = sendBin; this.close = close; this.label = label;
-    this.id = null; this.room = null; this.name = ''; this.rtt = null; this.state = 'lobby'; this.p = null;
+    this.id = null; this.room = null; this.name = ''; this.rtt = null; this.state = 'lobby'; this.p = null; this.cc = '';
     this.token = null; this.gameSince = 0; this.bin = null; this.binFor = null; this.binClient = null;
     this.awayTimer = null; this.opened = Date.now();
     this.bucket = LIMIT.textBurst; this.bucketT = Date.now(); this.badPw = 0;
@@ -178,11 +189,11 @@ class Client {
   enter(room, name) {
     this.room = room; this.name = this.playerName || cleanName(name) || 'Player'; this.id = newId(room); this.state = 'lobby';
     this.token = randomBytes(12).toString('hex'); tokens.set(this.token, this);
-    const peers = [...room.members.values()].map((c) => ({ id: c.id, name: c.name, state: c.state }));
+    const peers = [...room.members.values()].map((c) => ({ id: c.id, name: c.name, state: c.state, cc: c.cc }));
     room.members.set(this.id, this);
     if (!room.owner) room.owner = this.name;
-    this.json({ t: 'welcome', id: this.id, room: room.code, info: roomInfo(room), peers, token: this.token });
-    for (const c of room.members.values()) if (c !== this) c.json({ t: 'join', id: this.id, name: this.name });
+    this.json({ t: 'welcome', id: this.id, room: room.code, info: roomInfo(room), peers, token: this.token, cc: this.cc });
+    for (const c of room.members.values()) if (c !== this) c.json({ t: 'join', id: this.id, name: this.name, cc: this.cc });
     console.log(`[relay] ${this.label} joined ${room.code} "${room.name}" as ${this.id} (${this.name}), ${room.members.size}/${room.max}`);
     roomsChanged();
   }
@@ -268,14 +279,15 @@ class Client {
     clearTimeout(old.awayTimer); old.awayTimer = null;
     tokens.delete(old.token);
     for (const k of ['id', 'room', 'name', 'p', 'rtt', 'state', 'gameSince', 'bin', 'binClient']) this[k] = old[k];
+    this.cc ||= old.cc;
     if (this.binClient) this.binClient.binFor = this;
     this.token = randomBytes(12).toString('hex'); tokens.set(this.token, this);
     this.room.members.set(this.id, this);
     const away = old.awaySince ? Date.now() - old.awaySince : 0;
     Object.assign(old, { id: null, room: null, token: null, bin: null, binClient: null });
     old.close('replaced by a resumed connection');                 // if it was still open
-    const peers = [...this.room.members.values()].filter((c) => c !== this).map((c) => ({ id: c.id, name: c.name, state: c.state }));
-    this.json({ t: 'welcome', resumed: true, id: this.id, room: this.room.code, info: roomInfo(this.room), peers, token: this.token });
+    const peers = [...this.room.members.values()].filter((c) => c !== this).map((c) => ({ id: c.id, name: c.name, state: c.state, cc: c.cc }));
+    this.json({ t: 'welcome', resumed: true, id: this.id, room: this.room.code, info: roomInfo(this.room), peers, token: this.token, cc: this.cc });
     console.log(`[relay] ${this.label} resumed ${this.id} (${this.name}) in ${this.room.code} after ${away} ms`);
     logNet({ ev: 'resume', id: this.id, n: this.name, ...(this.p ? { p: this.p } : {}), room: this.room.code, away, state: this.state });
   }
@@ -344,6 +356,7 @@ export function handleUpgrade(req, socket) {
   let why = '';                                    // why the socket closed (relay log)
   const kill = (w) => { why ||= w; socket.destroy(); };
   const client = new Client((s) => frame(1, Buffer.from(s)), (b) => frame(2, b), (w) => kill(w || 'closed by the server'), ip);
+  client.cc = clientCountry(req);
   let acc = Buffer.alloc(0), frag = [], fragOp = 0, fragLen = 0, lastData = Date.now();
   const keepAlive = setInterval(() => {
     if (Date.now() - lastData > LIMIT.idleMs) kill(`nothing heard for ${LIMIT.idleMs / 1000} s`); else frame(9, Buffer.alloc(0));

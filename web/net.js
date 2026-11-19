@@ -167,7 +167,7 @@ export class Net extends EventTarget {
     for (const id of [...this.peers.keys()]) if (!now.has(id)) { this.emit('log', `${this.peers.get(id).name} left`); this.closePeer(id); }
     for (const p of m.peers) {
       const q = this.peers.get(p.id);
-      if (q) q.state = p.state; else { this.addPeer(p.id, p.name, false, p.state); this.emit('log', `${p.name} joined the room`); }
+      if (q) q.state = p.state; else { this.addPeer(p.id, p.name, false, p.state, p.cc); this.emit('log', `${p.name} joined the room`); }
     }
     if (this.state) this.send({ t: 'state', state: this.state });
     this.emit('log', `reconnected to the online server after ${(away / 1000).toFixed(1)} s`);
@@ -177,15 +177,15 @@ export class Net extends EventTarget {
     if (m.t === 'rooms') { this.rooms = m.rooms; this.emit('rooms', m.rooms); }
     else if (m.t === 'welcome' && m.resumed) this.onResumed(m);
     else if (m.t === 'welcome') {
-      this.id = m.id; this.room = m.room; this.info = m.info; this.token = m.token;
-      for (const p of m.peers) this.addPeer(p.id, p.name, true, p.state);   // we are the newcomer: we call them
+      this.id = m.id; this.room = m.room; this.info = m.info; this.token = m.token; this.cc = m.cc || '';
+      for (const p of m.peers) this.addPeer(p.id, p.name, true, p.state, p.cc);   // we are the newcomer: we call them
       this.emit('status');
       this.waiting?.resolve(m); this.waiting = null;
     } else if (m.t === 'error' && m.code === 'resume') {
       clearTimeout(this.resumeTimer); this.lostAt = 0; this.emit('log', 'disconnected from the online server (our place in the room was gone)');
       this.dropRoom(); this.emit('disconnected');
     } else if (m.t === 'error') { const e = new Error(m.error); e.code = m.code; this.waiting?.reject(e); this.waiting = null; }
-    else if (m.t === 'join') { this.addPeer(m.id, m.name, false); this.emit('log', `${m.name} joined the room`); this.emit('status'); }
+    else if (m.t === 'join') { this.addPeer(m.id, m.name, false, 'lobby', m.cc); this.emit('log', `${m.name} joined the room`); this.emit('status'); }
     else if (m.t === 'leave') { const p = this.peers.get(m.id); if (p) { this.closePeer(m.id); this.emit('log', `${p.name} left`); this.emit('status'); } }
     else if (m.t === 'state') { const p = this.peers.get(m.id); if (p) { p.state = m.state; this.emit('status'); } }
     else if (m.t === 'signal') this.onSignal(m.from, m.data);
@@ -222,9 +222,9 @@ export class Net extends EventTarget {
   emit(type, detail) { this.dispatchEvent(new CustomEvent(type, { detail })); }
 
   // ------------------------------------------------------------ WebRTC
-  addPeer(id, name, initiator, state = 'lobby') {
+  addPeer(id, name, initiator, state = 'lobby', cc = '') {
     this.fetchIce();
-    const p = { name, state, pc: new RTCPeerConnection({ iceServers: this.ice }), dc: null, rtt: null, direct: false, turn: false,
+    const p = { name, state, cc, pc: new RTCPeerConnection({ iceServers: this.ice }), dc: null, rtt: null, direct: false, turn: false,
                 tx: { seq: 0, hist: [] }, rx: { hi: null, seen: new Set(), gaps: 0, recovered: 0 },
                 ctr: { tx: 0, txRelay: 0, rx: 0, rxRelay: 0, last: 0, maxGap: 0, gaps: 0, recovered: 0 } };
     this.peers.set(id, p);
