@@ -292,14 +292,26 @@ const server = createServer((req, res) => {
   if (st.isDirectory()) { res.writeHead(404).end(); return; }
   // the page and our own scripts: script addresses get ?v=<build> (see versioned())
   const rewrite = base === root && (path === 'index.html' || SCRIPTS.includes(path));
+  // An address with this build's ?v= (versioned()) never changes content, so the browser keeps
+  // it. That matters most for nfs4.wasm (18 MB): it came again at every Start, and with it kept
+  // Chrome also keeps the compiled game. Everything else is checked each time, with an ETag so
+  // an unchanged file costs a 304.
+  const pinned = base === root && (path === 'dist/nfs4.wasm' || SCRIPTS.includes(path)) && url.searchParams.get('v') === version();
+  const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}${rewrite ? '-' + version() : ''}"`;
+  const head = {
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    'Cache-Control': pinned ? 'public, max-age=31536000, immutable' : 'no-cache',
+    ETag: etag,
+  };
+  // (Cloudflare makes the ETag weak when it compresses)
+  if (String(req.headers['if-none-match'] || '').split(/,\s*/).some((t) => t.replace(/^W\//, '') === etag)) { res.writeHead(304, head).end(); return; }
   const body = rewrite ? Buffer.from(versioned(readFileSync(file, 'utf8'))) : null;
   res.writeHead(200, {
     'Content-Type': types[extname(file)] || 'application/octet-stream',
     'Content-Length': body ? body.length : st.size,
-    'Cross-Origin-Opener-Policy': 'same-origin',
-    'Cross-Origin-Embedder-Policy': 'require-corp',
-    'Cross-Origin-Resource-Policy': 'same-origin',
-    'Cache-Control': 'no-cache',
+    ...head,
   });
   if (req.method === 'HEAD') { res.end(); return; }
   if (rewrite) { res.end(body); return; }
