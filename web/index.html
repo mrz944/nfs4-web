@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>/* the game needs https (shared memory, storage): plain http:// links go there first */
+if (location.protocol === 'http:' && /(^|\.)nfs4\.xyz$/.test(location.hostname)) location.replace('https://' + location.host + location.pathname + location.search + location.hash);</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>NFS4 High Stakes</title>
 <meta name="description" content="Need for Speed: High Stakes (1999) recompiled to run in your browser. Original handling, tracks, cops and music, no install, online races with friends.">
@@ -32,6 +34,8 @@
   @font-face { font-family: "Silkscreen"; font-weight: 400; font-display: swap; src: url(fonts/silkscreen-latin-400-normal.woff2) format("woff2"); }
   @font-face { font-family: "Silkscreen"; font-weight: 700; font-display: swap; src: url(fonts/silkscreen-latin-700-normal.woff2) format("woff2"); }
   @font-face { font-family: "Russo One"; font-weight: 400; font-display: block; src: url(fonts/russo-one-latin-400-normal.woff2) format("woff2"); }
+  /* country flags (Twemoji, CC-BY 4.0: fonts/LICENSE-twemoji-country-flags.md): Windows has no flag emoji. Loaded only when a flag shows. */
+  @font-face { font-family: "Twemoji Country Flags"; font-display: swap; unicode-range: U+1F1E6-1F1FF; src: url(fonts/twemoji-country-flags.woff2) format("woff2"); }
   :root {
     --night: #02050f; --ink: #031024; --navy: #0a1640; --deep: #0f2266; --blue: #1c3fb0; --royal: #2f62e6; --rim: #5f8dff; --ice: #b9d2ff;
     --aqua: #3ef2d0; --teal: #19b8a8; --cyan: #7ff6ff; --amber: #ffc23a; --red: #ff4a3d;
@@ -195,6 +199,9 @@
   .namehint a { color: var(--aqua); white-space: nowrap; }
   .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px; }
   .bar h3 { margin: 0; }
+  #inapp-link { width: 100%; max-width: 360px; margin: 6px 0; font: inherit; color: inherit; background: rgba(0, 0, 0, .4); border: 1px solid #1a2a7c; padding: 4px 6px; }
+  #inapp-open { margin-top: 8px; }
+  #dl-go, #tab-here { margin: 4px 0 8px; }
   .card { margin-top: 10px; padding: 12px; clip-path: var(--notch); background: rgba(1, 6, 36, .88);
     box-shadow: inset 3px 0 0 var(--aqua), inset 0 2px 0 #1a2a7c, inset -2px -2px 0 #1a2a7c; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -215,6 +222,7 @@
   .ping-good { color: var(--ok); font-weight: bold; } .ping-ok { color: var(--amber); font-weight: bold; } .ping-bad { color: var(--err); font-weight: bold; }
   #rooms-empty { margin-top: 10px; }
   #members { list-style: none; padding: 0; margin: 10px 0; }
+  .flag { font-family: "Twemoji Country Flags", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; font-size: 1.15em; line-height: 1; margin-right: .35em; vertical-align: -.1em; }
   #members li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 12px; margin-bottom: 4px; font-size: 12px;
     background: linear-gradient(90deg, var(--rim) 0 4px, rgba(40, 70, 190, .4) 4px, rgba(10, 20, 80, .2)); }
   #members li:first-child { background: linear-gradient(90deg, var(--aqua) 0 4px, rgba(40, 70, 190, .4) 4px, rgba(10, 20, 80, .2)); }
@@ -464,12 +472,18 @@
         happen. Single and online races are tested; Career, Hot Pursuit and High Stakes modes haven't been played
         through yet. If something breaks, reloading the page usually helps. Please report problems on
         <a href="https://discord.gg/sAjTGE7gkw" target="_blank" rel="noopener">Discord</a> or <a href="https://github.com/mrz944/nfs4-web/issues" target="_blank" rel="noopener">GitHub</a>.</div>
+      <div id="inapp" class="card" hidden><b>Open this page in your browser.</b> The game can't run inside <span id="inapp-app">this app</span>: it needs a full browser such as Chrome or Safari.
+        <span id="inapp-android" hidden><br><button id="inapp-open" class="small">Open in Chrome</button></span>
+        <span id="inapp-ios" hidden><br>Tap <b>⋯</b> (top right), then <b>Open in browser</b> or <b>Open in Safari</b>.</span>
+        <br>Or copy the link and paste it into your browser: <input id="inapp-link" readonly> <button id="inapp-copy" class="small secondary">Copy link</button></div>
       <div id="ios-app" class="card" hidden><b>Fullscreen on iPhone:</b> open Safari's Share menu (on iOS 26 tap ⋯ first), choose <b>Add to Home Screen</b>, then start the game from its new icon. It has its own storage, so you pick the game folder once more there. <button id="ios-app-ok" class="small secondary">Got it</button></div>
       <div id="update" class="card" hidden>A newer version of the game is on the server. <button id="update-reload" class="small">Reload to update</button></div>
       <section class="panel">
         <div class="ph"><h2>status</h2></div>
         <div class="pb">
           <p id="status"></p>
+          <button id="dl-go" class="small" hidden>Download the game</button>
+          <button id="tab-here" class="small" hidden>Play here instead</button>
           <progress id="progress" max="1" value="0" hidden></progress>
           <div id="log" hidden></div>
           <p class="logtoggle"><a href="#" id="log-toggle">Show technical log</a></p>

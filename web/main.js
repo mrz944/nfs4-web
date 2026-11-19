@@ -84,8 +84,19 @@ function track(e, d = {}) {
 }
 const pageT0 = Date.now();
 let playStats = { played: false, frames: 0, ms: 0 };
+// "Open in Chrome" from an in-app browser can't carry #room=… (an intent link's # is its own),
+// so it comes as ?room=…: back into the hash before anything reads it
+{
+  const q = new URLSearchParams(location.search), r = q.get('room');
+  if (r && !location.hash) { q.delete('room'); const s = q.toString(); history.replaceState(null, '', location.pathname + (s ? '?' + s : '') + '#room=' + encodeURIComponent(r)); }
+}
+// the game download, for the end-of-visit event: how far it got, and what the page told the visitor
+const dl = { state: 'none', got: 0, total: 0, notice: '' };
 track('view', { w: innerWidth, h: innerHeight, lang: navigator.language, room_link: !!location.hash.match(/room=/) });
-window.addEventListener('pagehide', () => track('end', { secs: (Date.now() - pageT0) / 1000, played: playStats.played, fps: playStats.ms ? playStats.frames * 1000 / playStats.ms : 0 }));
+window.addEventListener('pagehide', () => track('end', {
+  secs: (Date.now() - pageT0) / 1000, played: playStats.played, fps: playStats.ms ? playStats.frames * 1000 / playStats.ms : 0,
+  dl: dl.state, dl_pct: dl.total ? Math.floor(dl.got / dl.total * 100) : 0, notice: dl.notice, hidden: document.hidden,
+}));
 window.addEventListener('pagehide', () => flushLog(true));
 // gave up while the game was loading (black screen, too slow): worth knowing, with the phases so far
 window.addEventListener('pagehide', () => { if (phase.click != null && phase.shown == null) track('error', { kind: 'left_loading', msg: Object.entries(phase).map(([k, v]) => `${k}=${v}`).join(' '), secs: (performance.now() - t0) / 1000 }); });
@@ -149,8 +160,23 @@ async function packSource() {
 }
 async function readText(dir, name) { try { return await (await (await dir.getFileHandle(name)).getFile()).text(); } catch { return null; } }
 async function writeText(dir, name, text) { await writeFile(dir, name, text); }
+const MB = 2 ** 20;
+const onPhone = () => matchMedia('(pointer: coarse)').matches;
+// a failed download that is the browser's limits, not the network: said as it is, not retried
+const stopped = (msg, notice) => { dl.state = 'blocked'; dl.notice = notice; const e = new Error(msg); e.blocked = true; return e; };
+// the page is on screen and online (a phone cuts downloads off when the screen locks or the app
+// is switched; they carry on from here)
+const usable = () => new Promise((ok) => {
+  const check = () => {
+    if (document.hidden || !navigator.onLine) return;
+    document.removeEventListener('visibilitychange', check); removeEventListener('online', check); ok();
+  };
+  document.addEventListener('visibilitychange', check); addEventListener('online', check); check();
+});
 async function importPack(base) {
   status('Checking the game download…');
+  // DecompressionStream: Safari 16.4 (iOS 16.4) and newer
+  if (typeof DecompressionStream === 'undefined') throw stopped('This browser is too old to unpack the game download. Update it (on iPhone and iPad: iOS 16.4 or newer), then reload.', 'old');
   const ir = await fetch(base + 'index.json');
   if (!ir.ok) throw new Error(`Game download unavailable (${ir.status}). Reload to retry.`);
   const idx = await ir.json();
@@ -165,6 +191,32 @@ async function importPack(base) {
     await writeText(dir, '.pack-id', idx.id);
   }
   const doneChunks = new Set(((await readText(dir, '.pack-done')) || '').split(',').filter(Boolean));
+  const todo = idx.chunks.filter((c) => !doneChunks.has(c.name));
+  const sizeOf = (cs) => cs.reduce((s, c) => s + c.files.reduce((t, f) => t + f[1], 0), 0);
+  const need = sizeOf(todo), total = sizeOf(idx.chunks), gzLeft = todo.reduce((s, c) => s + c.gz, 0);
+  // room for it? Private and incognito windows get little storage, and a full disk fails late:
+  // say so before downloading anything
+  let est = null;
+  try { est = await navigator.storage.estimate(); } catch {}
+  if (est?.quota) {
+    const free = est.quota - (est.usage || 0);
+    log(`storage: ${(free / MB).toFixed(0)} MB free of ${(est.quota / MB).toFixed(0)} MB, the game needs ${(need / MB).toFixed(0)} MB more`);
+    if (free < need * 1.02) {
+      if (est.quota < total * 1.1) throw stopped(`This browser window doesn't have room for the game files (about ${(total / MB).toFixed(0)} MB): private and incognito windows get very little storage. Open the page in a normal window.`, 'quota_window');
+      throw stopped(`Not enough free disk space for the game files: they need about ${((need - free) / MB + 20).toFixed(0)} MB more. Free some space, then reload.`, 'quota_disk');
+    }
+  }
+  // on mobile data or data saver (Android tells): only on a click
+  const conn = navigator.connection;
+  if (conn && (conn.saveData || conn.type === 'cellular') && gzLeft > 50 * MB) {
+    const how = conn.saveData ? 'data saver' : 'mobile data';
+    dl.state = 'asked'; dl.notice = 'mobile_data';
+    status(`You're on ${how}. The game is a one-time download of ${(gzLeft / MB).toFixed(0)} MB, kept in this browser afterwards. On Wi-Fi it starts by itself.`);
+    const go = $('dl-go'); go.textContent = `Download ${(gzLeft / MB).toFixed(0)} MB`; go.hidden = false;
+    log(`download: waiting for a click (${how}, ${(gzLeft / MB).toFixed(0)} MB)`);
+    await new Promise((ok) => go.addEventListener('click', ok, { once: true }));
+    go.hidden = true; dl.notice = ''; log('download: started by the click');
+  }
   const dirs = new Map([['', dir]]);
   const subdir = async (path) => {
     const parts = path.split('/').slice(0, -1);
@@ -172,61 +224,101 @@ async function importPack(base) {
     for (const p of parts) { key += p + '/'; if (!dirs.has(key)) dirs.set(key, await d.getDirectoryHandle(p, { create: true })); d = dirs.get(key); }
     return d;
   };
-  const MB = 2 ** 20, t0 = performance.now();
-  let got = idx.chunks.filter((c) => doneChunks.has(c.name)).reduce((s, c) => s + c.gz, 0), fresh = 0;
+  const t0 = performance.now();
+  let got = idx.chunks.filter((c) => doneChunks.has(c.name)).reduce((s, c) => s + c.gz, 0), fresh = 0, file = '';
+  Object.assign(dl, { state: 'downloading', got, total: idx.gz });
   $('progress').hidden = false;
+  const rate = () => fresh / Math.max((performance.now() - t0) / 1000, 0.5);
   const show = () => {
+    dl.got = got;
     $('progress').value = got / idx.gz;
-    const secs = (performance.now() - t0) / 1000, rate = fresh / Math.max(secs, 0.5);
-    status(`Downloading the game files… ${(got / MB).toFixed(0)} / ${(idx.gz / MB).toFixed(0)} MB` + (secs > 2 && rate > 0 ? ` · ${(rate / MB).toFixed(1)} MB/s` : ''));
+    const secs = (performance.now() - t0) / 1000;
+    status(`Downloading the game files… ${(got / MB).toFixed(0)} / ${(idx.gz / MB).toFixed(0)} MB` + (secs > 2 && rate() > 0 ? ` · ${(rate() / MB).toFixed(1)} MB/s` : '')
+      + (onPhone() ? ' · Keep this page open: it carries on where it stopped.' : ''));
   };
   if (got) log(`game pack ${idx.id}: resuming, ${doneChunks.size}/${idx.chunks.length} chunks already here`);
-  for (const c of idx.chunks) {
-    if (doneChunks.has(c.name)) continue;
-    let lastErr;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const before = got, beforeFresh = fresh;
-      try {
-        const r = await fetch(base + c.name);
-        if (!r.ok) throw new Error(`${c.name}: HTTP ${r.status}`);
-        const counted = r.body.pipeThrough(new TransformStream({ transform(b, ctl) { got += b.length; fresh += b.length; show(); ctl.enqueue(b); } }));
-        const rd = counted.pipeThrough(new DecompressionStream('gzip')).getReader();
-        let buf = new Uint8Array(0);                          // decoded bytes not yet written
-        const pull = async () => { const { done, value } = await rd.read(); if (done) throw new Error(`${c.name}: ended early`); buf = buf.length ? concat(buf, value) : value; };
-        for (const [path, size] of c.files) {
-          const fh = await (await subdir(path)).getFileHandle(path.split('/').at(-1), { create: true });
-          const isIni = path.toLowerCase() === 'nfs4.ini', ini = [];
-          const w = await openWritable(fh);
-          let left = size;
-          while (left > 0) {
-            if (!buf.length) await pull();
-            const n = Math.min(left, buf.length), part = buf.subarray(0, n);
-            if (isIni) ini.push(part.slice()); else await w.write(exact(part));
-            buf = buf.subarray(n); left -= n;
+  // the screen stays on while it downloads (a locked phone stops it); asked again after the page was away
+  let lock = null;
+  const wake = async () => { if (document.hidden || !navigator.wakeLock) return; try { lock = await navigator.wakeLock.request('screen'); } catch {} };
+  document.addEventListener('visibilitychange', wake); wake();
+  const ticker = setInterval(() => log(`download: ${(got / MB).toFixed(0)}/${(idx.gz / MB).toFixed(0)} MB, ${doneChunks.size}/${idx.chunks.length} chunks, ${(rate() / MB).toFixed(1)} MB/s${document.hidden ? ', page hidden' : ''}`), 10000);
+  const WAITS = [2, 5, 15, 30, 60];                         // seconds before each retry of a chunk
+  try {
+    for (const c of idx.chunks) {
+      if (doneChunks.has(c.name)) continue;
+      let lastErr = null;
+      for (let attempt = 0; ; attempt++) {
+        const before = got, beforeFresh = fresh;
+        let w = null;
+        try {
+          const r = await fetch(base + c.name);
+          if (!r.ok) throw new Error(`${c.name}: HTTP ${r.status}`);
+          const counted = r.body.pipeThrough(new TransformStream({ transform(b, ctl) { got += b.length; fresh += b.length; show(); ctl.enqueue(b); } }));
+          const rd = counted.pipeThrough(new DecompressionStream('gzip')).getReader();
+          let buf = new Uint8Array(0);                          // decoded bytes not yet written
+          const pull = async () => { const { done, value } = await rd.read(); if (done) throw new Error(`${c.name}: ended early`); buf = buf.length ? concat(buf, value) : value; };
+          for (const [path, size] of c.files) {
+            file = path;
+            const fh = await (await subdir(path)).getFileHandle(path.split('/').at(-1), { create: true });
+            const isIni = path.toLowerCase() === 'nfs4.ini', ini = [];
+            w = await openWritable(fh);
+            let left = size;
+            while (left > 0) {
+              if (!buf.length) await pull();
+              const n = Math.min(left, buf.length), part = buf.subarray(0, n);
+              if (isIni) ini.push(part.slice()); else await w.write(exact(part));
+              buf = buf.subarray(n); left -= n;
+            }
+            if (isIni) await w.write(patchIni(new TextDecoder('latin1').decode(concat(...ini)), settings.movies));
+            await w.close(); w = null;
           }
-          if (isIni) await w.write(patchIni(new TextDecoder('latin1').decode(concat(...ini)), settings.movies));
-          await w.close();
+          doneChunks.add(c.name);
+          await writeText(dir, '.pack-done', [...doneChunks].join(','));
+          break;
+        } catch (e) {
+          got = before; fresh = beforeFresh; show();
+          // let go of the half-written file: an open one blocks the next try ("could not be modified")
+          if (w) { try { await (w.abort ? w.abort() : w.close()); } catch {} }
+          const away = document.hidden || !navigator.onLine;
+          log(`game pack: ${c.name} failed (${e.name}: ${e.message}), attempt ${attempt + 1}${away ? ', page hidden or offline' : ''}, in ${file}`);
+          if (/QuotaExceeded/.test(e.name) || attempt >= WAITS.length) { lastErr = e; break; }
+          if (away) {                                            // cut off while away: not counted
+            attempt--;
+            status(`The download paused while this page was in the background. It carries on when the page is back.`);
+          } else {
+            status(`The download stopped (${e.message}). Trying again in ${WAITS[attempt]} s…`);
+            await new Promise((ok) => setTimeout(ok, WAITS[attempt] * 1000));
+          }
+          await usable();
         }
-        doneChunks.add(c.name);
-        await writeText(dir, '.pack-done', [...doneChunks].join(','));
-        lastErr = null; break;
-      } catch (e) {
-        lastErr = e; got = before; fresh = beforeFresh;
-        log(`game pack: ${c.name} failed (${e.message}), attempt ${attempt + 1}`);
-        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      }
+      if (lastErr) {
+        dl.state = 'failed';
+        const err = lastErr;
+        let free = -1;
+        try { const e2 = await navigator.storage.estimate(); free = ((e2.quota || 0) - (e2.usage || 0)) / MB; } catch {}
+        // storage refusing the files (Safari words it "unknown transient reason (e.g. out of memory)")
+        const full = /QuotaExceeded|UnknownError|NoModificationAllowed|InvalidState/.test(err.name) ? ' The browser would not store the files: free some disk space, leave private browsing, or close other tabs with this page.' : '';
+        const out = new Error(`Download failed: ${err.message}.${full} Reload to continue where it stopped.`);
+        out.info = { name: err.name, chunk: c.name, file, free_mb: Math.round(free), hidden: document.hidden, pct: Math.floor(got / idx.gz * 100) };
+        throw out;
       }
     }
-    if (lastErr) {
-      // storage refusing the files (Safari words it "unknown transient reason (e.g. out of memory)")
-      const full = /QuotaExceeded|UnknownError|NoModificationAllowed|InvalidState/.test(lastErr.name) ? ' The browser would not store the files: free some disk space, leave private browsing, or close other tabs with this page.' : '';
-      throw new Error(`Download failed: ${lastErr.message}.${full} Reload to continue where it stopped.`);
-    }
+  } finally {
+    clearInterval(ticker);
+    document.removeEventListener('visibilitychange', wake);
+    lock?.release().catch(() => {});
   }
   for (const d of idx.dirs || []) await subdir(d + '/');
   log(`game pack ${idx.id}: ${(fresh / MB).toFixed(0)} MB in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
   await writeText(dir, '.download-complete', 'complete');
+  dl.state = 'done'; dl.got = idx.gz;
   $('progress').hidden = true;
+  // keep the files: Safari otherwise deletes a site's storage after 7 days without a visit. Not on
+  // Firefox, which asks the visitor about it (and keeps them anyway unless the disk runs full).
+  if (!/Firefox/.test(navigator.userAgent)) navigator.storage.persist?.().then((p) => log('storage: kept for good:', p)).catch(() => {});
 }
+
 // Safari's FileSystemWritableFileStream.write() writes the whole ArrayBuffer behind a typed array,
 // ignoring a subarray's offset and length, so only ever hand it arrays that cover their buffer.
 const exact = (u) => (u.byteOffset === 0 && u.byteLength === u.buffer.byteLength ? u : u.slice());
@@ -256,7 +348,9 @@ async function checkPack() {
       for (const f of ['.download-complete', '.pack-done']) await d.removeEntry(f).catch(() => {});
       try { const t = await ciDir(await ciDir(d, 'data'), 'text'); await t.removeEntry(await ciFile(t, 'text.eng.orig')); } catch {}
     } else await writeText(d, '.pack-checked', id);
+    return bad;
   } catch (e) { log('game files check failed:', e.message); }
+  return 0;
 }
 function concat(...parts) {
   const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
@@ -447,6 +541,42 @@ async function toggleFullscreen() {
 const isIPhone = () => /iPhone|iPod/.test(navigator.userAgent) || new URLSearchParams(location.search).get('iphone') === '1';
 const isWebApp = () => navigator.standalone === true || matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches;
 const wantHomeScreenTip = () => !fsSupported() && isIPhone() && !isWebApp();
+// An app's own browser (Instagram, Facebook, TikTok...), which can't run the game: its name, or ''.
+// '; wv)' is Android's WebView, which other apps use for links.
+function inAppBrowser() {
+  const u = navigator.userAgent;
+  return /Instagram/.test(u) ? 'Instagram' : /FBAN|FBAV|FB_IAB|FBIOS/.test(u) ? 'Facebook' : /BytedanceWebview|musical_ly|TikTok/.test(u) ? 'TikTok'
+    : /\bLine\//.test(u) ? 'LINE' : /; wv\)/.test(u) ? 'app' : '';
+}
+// how to get to a real browser: on Android a button that opens Chrome (an intent link; the room
+// goes as ?room=, see the top), on iPhone where the app keeps "Open in browser"; a link to copy on both
+function showInApp(app) {
+  const u = navigator.userAgent, link = location.href;
+  $('inapp-app').textContent = app === 'app' ? 'this app' : app;
+  $('inapp-link').value = link;
+  $('inapp-android').hidden = !/Android/.test(u);
+  $('inapp-ios').hidden = !/iPhone|iPad|iPod/.test(u);
+  $('inapp-open').addEventListener('click', () => {
+    const to = new URL(location.href), room = roomFromHash();
+    to.hash = '';
+    if (room) to.searchParams.set('room', room);
+    log('in-app browser: opening Chrome');
+    location.href = `intent://${to.host}${to.pathname}${to.search}#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=${encodeURIComponent(to.href)};end`;
+  });
+  $('inapp-copy').addEventListener('click', async () => {
+    const input = $('inapp-link');
+    input.select();
+    let ok = false;
+    try { await navigator.clipboard.writeText(link); ok = true; } catch {}
+    if (!ok) try { ok = document.execCommand('copy'); } catch {}
+    $('inapp-copy').textContent = ok ? 'Copied' : 'Select and copy it';
+  });
+  // above the menu (on a phone the menu comes first and the card would be a long scroll down)
+  const card = $('inapp'), layout = document.querySelector('.layout');
+  layout.parentNode.insertBefore(card, layout);
+  card.hidden = false;
+  status(`The game can't run in ${app === 'app' ? 'this app' : app}'s own browser: open the page in Chrome or Safari (see above).`, true);
+}
 function showHomeScreenCard() {               // on the start page, until "Got it"
   if (!wantHomeScreenTip()) return;
   const card = $('ios-app');
@@ -887,13 +1017,25 @@ let padsAtStart = 0;
 // ------------------------------------------------------------------- audio
 // The AudioContext is made inside the Start click (Safari only lets audio start during the
 // click itself, not after the awaits in start()); startAudio() then plugs the game into it.
+// The context runs at 44.1 kHz, the game's mix rate, and the browser converts it to the sound
+// device's rate. ?audiorate=native (remembered; ?audiorate=44100 goes back) runs it at the
+// device's own rate instead, and the worklet converts (audio-worklet.js): a test for Safari,
+// where NFS3 Web's sound turned distorted and off pitch after a while.
 let earlyAudio = null;
+function audioRate() {
+  try {
+    const q = new URLSearchParams(location.search).get('audiorate');
+    if (q) localStorage.setItem('nfs4.audioRate', q === 'native' ? 'native' : '44100');
+    return localStorage.getItem('nfs4.audioRate') === 'native' ? 'native' : 44100;
+  } catch { return 44100; }
+}
 function makeAudioContext() {
   // iPhone: Web Audio counts as ringer sound, muted by the silent switch, unless the page says it
   // plays media (Safari 17+, navigator.audioSession); set before the context is made
   try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch {}
   try {
-    const ctx = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+    const rate = audioRate();
+    const ctx = new AudioContext(rate === 'native' ? { latencyHint: 'interactive' } : { sampleRate: 44100, latencyHint: 'interactive' });
     ctx.resume().catch(() => {});
     return { ctx, worklet: ctx.audioWorklet.addModule('audio-worklet.js') };
   } catch (e) { log('audio context failed:', e.message); return null; }
@@ -908,7 +1050,21 @@ async function startAudio(mod) {
   node.port.onmessage = (e) => { const { under, secs } = e.data; if (under > 0.05 * 44100 * secs) log(`audio: ${(under / 441 / secs).toFixed(0)}% silence over ${secs.toFixed(0)} s (game mixed too little)`); };
   const gain = new GainNode(ctx, { gain: Math.max(0, Math.min(100, Number(settings.volume) || 0)) / 100 });
   node.connect(gain).connect(ctx.destination);
-  log('audio context:', ctx.state, settings.volume !== 100 ? `(volume ${settings.volume}%)` : '', navigator.audioSession ? `(session ${navigator.audioSession.type})` : '');
+  const lat = () => `${ctx.sampleRate} Hz, latency ${Math.round((ctx.baseLatency || 0) * 1000)}+${Math.round((ctx.outputLatency || 0) * 1000)} ms`;
+  log('audio context:', ctx.state, lat(), settings.volume !== 100 ? `(volume ${settings.volume}%)` : '', navigator.audioSession ? `(session ${navigator.audioSession.type})` : '');
+  // the sound device changing under the page (headphones, a call taking the device) shows as
+  // other latencies: log it, with the time, to line it up with what players hear. Chrome on
+  // Windows flips between two of them (32 and 40 ms) all the time: one already logged isn't
+  // logged again, and 10 lines at most.
+  const latMs = () => ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000;
+  const latSeen = [latMs()];
+  const latTimer = setInterval(() => {
+    const ms = latMs();
+    if (latSeen.some((s) => Math.abs(ms - s) < 5)) return;
+    latSeen.push(ms);
+    log(`audio context: now ${lat()} (before: ${latSeen.slice(0, -1).map(Math.round).join(', ')} ms)`);
+    if (latSeen.length > 10) clearInterval(latTimer);
+  }, 5000);
   // browsers keep audio suspended until a user gesture, and iOS stops it ("interrupted") for a
   // call, Siri or switching apps: then the next touch, click or key press starts it again.
   // Never wait for it here. Touches count as gestures on touchend, not on pointerdown.
@@ -940,6 +1096,25 @@ async function backToPage() {
   try { document.exitPointerLock?.(); } catch {}
   try { if (fsElement()) await (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch {}
   location.reload();
+}
+// what a stop of the game means for the player, in words they can act on
+function abortText(what) {
+  if (/fetching of the wasm failed|Load failed|Failed to fetch|NetworkError|network error/i.test(what)) return 'The game couldn\'t load: the connection dropped while it was downloading. Reload the page to try again.';
+  if (/is not an object or function|LinkError|CompileError/i.test(what)) return 'This page and the game on the server don\'t match: a new version came out while it loaded. Reload the page.';
+  return 'The game stopped: ' + what;
+}
+// The game stops itself (its own message box, then it quits and the page reloads) when it can't
+// open a file: a game file missing or damaged, or storage too full to save. NFS4 says "STREAM -
+// unable to open file '<file>'" or "Need For Speed files are corrupted". The reason is kept over
+// the reload (sessionStorage) for init(): it checks the game files again and says what happened,
+// instead of a start page that looks as if nothing did. (From NFS3 Web.)
+function noteCrash(msg) {
+  if (!/unable to open file|files are corrupted/i.test(msg)) return;
+  const file = (/['`]\.?\\?([^'`]+)['`]/.exec(msg)?.[1] || '').replace(/\\/g, '/');
+  try { sessionStorage.setItem('nfs4.crash', JSON.stringify({ msg, file })); } catch {}
+}
+function takeCrash() {
+  try { const c = JSON.parse(sessionStorage.getItem('nfs4.crash') || 'null'); sessionStorage.removeItem('nfs4.crash'); return c; } catch { return null; }
 }
 // the game ended (crash or exit): say so over the game instead of leaving a frozen picture
 let gameDead = false;
@@ -980,8 +1155,8 @@ async function start() {
   const mod = await NFS4({
     setStatus: (t) => t && log('[emscripten]', t),
     monitorRunDependencies: (n) => log('[emscripten] pending dependencies:', n),
-    onAbort: (what) => { log('ABORT', what); track('error', { kind: 'abort', msg: String(what) }); gameStopped('The game stopped: ' + what); },
-    onGameMessage: (t) => { log('ERROR game message:', t); track('error', { kind: 'message', msg: t }); },
+    onAbort: (what) => { log('ABORT', what); track('error', { kind: 'abort', msg: String(what) }); gameStopped(abortText(String(what))); },
+    onGameMessage: (t) => { log('ERROR game message:', t); track('error', { kind: 'message', msg: t }); noteCrash(t); },
     onLap: reportLap,                                                // each lap the player finishes (game.c)
     onGameExit: (code) => {
       if (code === 0) { log('game quit: back to the start page'); backToPage(); return; }
@@ -1144,6 +1319,16 @@ function showNetBadge() {
 // Room browser and room page. Rooms live on the relay (relay.mjs); we join
 // before Start so everyone sees each other (and WebRTC links come up) early.
 const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+// a player's country (two letters, from the server: Cloudflare's guess by address) as its flag,
+// the country's name on hover; null when unknown
+const regionName = (() => { try { const d = new Intl.DisplayNames(['en'], { type: 'region' }); return (c) => { try { return d.of(c) || c; } catch { return c; } }; } catch { return (c) => c; } })();
+function flag(cc) {
+  if (!/^[A-Z]{2}$/.test(cc || '')) return null;
+  const name = regionName(cc);
+  return el('span', { className: 'flag', role: 'img', ariaLabel: name, title: name, textContent: String.fromCodePoint(...[...cc].map((ch) => 0x1f1a5 + ch.charCodeAt(0))) });
+}
+// a name with its flag in front
+const flagged = (name, cc, props = {}) => el('span', props, ...[flag(cc), name].filter(Boolean));
 const pingClass = (ms) => (ms < 60 ? 'ping-good' : ms < 130 ? 'ping-ok' : 'ping-bad');
 const savedPass = (code) => { try { return sessionStorage.getItem('nfs4.pass.' + code) || ''; } catch { return ''; } };
 const savePass = (code, pw) => { try { pw ? sessionStorage.setItem('nfs4.pass.' + code, pw) : sessionStorage.removeItem('nfs4.pass.' + code); } catch {} };
@@ -1250,7 +1435,7 @@ function setupOnline() {
       const title = el('div', { className: 'rname', textContent: r.name });
       if (r.locked) title.append(el('span', { className: 'tag', textContent: 'password', title: 'Needs a password' }));
       if (r.racing) title.append(el('span', { className: 'tag race', textContent: 'racing', title: 'Someone in this room is in the game' }));
-      const who = el('div', { className: 'sub', textContent: r.players.map((p) => p.name).join(', ') });
+      const who = el('div', { className: 'sub' }, ...r.players.flatMap((p, i) => [...(i ? [', '] : []), flagged(p.name, p.cc)]));
       const join = el('button', { className: 'small', textContent: full ? 'Full' : 'Join', disabled: full || !!net.id });
       join.onclick = () => joinRoom(r.code, r.locked ? null : '', r.name);
       tb.append(el('tr', {},
@@ -1269,13 +1454,13 @@ function setupOnline() {
     $('room-title').textContent = net.info?.name || net.room;
     if (net.info?.locked) $('room-title').append(el('span', { className: 'tag', textContent: 'password' }));
     const ul = $('members'); ul.textContent = '';
-    ul.append(el('li', {}, el('span', { textContent: `${myName() || 'Player'} (you)` }), el('span', { className: 'muted', textContent: net.relayRtt != null ? `server ${Math.round(net.relayRtt)} ms` : '' })));
+    ul.append(el('li', {}, flagged(`${myName() || 'Player'} (you)`, net.cc), el('span', { className: 'muted', textContent: net.relayRtt != null ? `server ${Math.round(net.relayRtt)} ms` : '' })));
     for (const p of net.peers.values()) {
       const r = net.rttTo(p);
       const right = el('span', {},
         el('span', { className: r != null ? pingClass(r) : 'muted', textContent: r != null ? `${Math.round(r)} ms` : '…' }),
         el('span', { className: 'muted', textContent: ` · ${p.direct ? (p.turn ? 'via TURN' : 'direct') : 'via server'}${p.state === 'game' ? ' · in game' : ''}` }));
-      ul.append(el('li', {}, el('span', { textContent: p.name }), right));
+      ul.append(el('li', {}, flagged(p.name, p.cc), right));
     }
     if (!net.peers.size) ul.append(el('li', {}, el('span', { className: 'muted', textContent: 'Waiting for friends… send them the invite link.' })));
     const best = net.bestHost();
@@ -1398,7 +1583,7 @@ function reportLap(track, flags, code, lap, laps, ticks) {
     .then(async (r) => {
       const d = await r.json().catch(() => null);
       if (!r.ok) { log(`lap records: not sent (${d?.error === 'taken' ? `${n} is another player's name` : d?.error || r.status})`); return; }
-      if (d?.p) { playerIs(d); race.sent++; }
+      if (d?.p) { playerIs(d); race.sent++; try { localStorage.setItem('nfs4.lapAt', String(Date.now())); } catch {} }
       if (d?.best) log('lap records: a new best lap for', d?.n || n);
     }).catch(() => {});
 }
@@ -1467,6 +1652,27 @@ function setupLaps() {
 // ---------------------------------------------------------------- activity
 // Start page: who is around (/__live on serve.mjs), the most active racers, the daily race,
 // push notifications, and a note when the server has a newer build than this page.
+// A newer build: a page left open on the start page reloads by itself the next time it's out of
+// sight (or at once if it is), so old pages don't keep old behaviour around. Never in a game, in
+// a room, while downloading, or with a dialog open or something being typed; in a game the page
+// reloads after it anyway (backToPage).
+let newerBuild = null, updateArmed = false;
+function reloadForUpdate() {
+  const safe = () => !gameStarted && !net.id && !['downloading', 'asked'].includes(dl.state)
+    && !document.querySelector('dialog[open]') && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
+  const go = () => {
+    if (!document.hidden) return;
+    if (!safe()) return;
+    try {                                                    // once per build, whatever happens
+      if (sessionStorage.getItem('nfs4.updateReload') === newerBuild) return;
+      sessionStorage.setItem('nfs4.updateReload', newerBuild);
+    } catch { return; }
+    log('reloading for the newer build (the page was out of sight)'); flushLog(true);
+    location.reload();
+  };
+  if (!updateArmed) { updateArmed = true; document.addEventListener('visibilitychange', go); }
+  go();
+}
 function setupActivity() {
   let topWin = '7d', last = null;
   const fmtIn = (ms) => { const m = Math.round(ms / 60e3); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
@@ -1487,7 +1693,7 @@ function setupActivity() {
         el('span', { className: until <= 0 ? 'live' : '', textContent: until <= 0 ? 'on now, join a room!' : `starts in ${fmtIn(until)}` }));
     } else $('daily').hidden = true;
     if (d.build && buildInfo?.built && d.build !== buildInfo.built) {
-      if ($('update').hidden) log(`a newer build is on the server (${d.build}, this page has ${buildInfo.built})`);
+      if (newerBuild !== d.build) { newerBuild = d.build; log(`a newer build is on the server (${d.build}, this page has ${buildInfo.built})`); reloadForUpdate(); }
       $('update').hidden = gameStarted;
     }
   }
@@ -1606,6 +1812,35 @@ function oneTab() {
       .catch(() => ok(true));
   });
 }
+// The tab with the game gives it up when another one asks ("Play here instead"), unless it is in
+// a game: then it says so and keeps it. It gives it up by reloading (that lets go of the lock and
+// of any game file it has open); the other tab is already waiting for the lock and gets it first.
+const tabs = typeof BroadcastChannel === 'function' ? new BroadcastChannel('nfs4-tabs') : null;
+function holdTab() {
+  if (!tabs) return;
+  tabs.onmessage = (e) => {
+    if (e.data?.take == null) return;
+    if (gameStarted) { tabs.postMessage({ busy: e.data.take }); log('another tab asked for the game: in a game here, kept it'); return; }
+    log('another tab asked for the game: handing it over'); flushLog(true);
+    location.reload();
+  };
+}
+// this tab hasn't got it: wait until the other one closes or hands it over
+function waitTab() {
+  const me = Math.random().toString(36).slice(2);
+  const got = new Promise((ok) => navigator.locks.request('nfs4-game', () => { ok(); return new Promise(() => {}); }).catch(() => ok()));
+  const b = $('tab-here');
+  if (tabs) {
+    b.hidden = false;
+    b.onclick = () => { b.disabled = true; tabs.postMessage({ take: me }); log('asked the other tab for the game'); };
+    tabs.onmessage = (e) => {
+      if (e.data?.busy !== me) return;
+      b.disabled = false;
+      status('The other tab is in a game. Finish it there and choose Exit Game: this page carries on by itself then.', true);
+    };
+  }
+  return got.then(() => { b.hidden = true; tabs && (tabs.onmessage = null); log('the game is in this tab now'); });
+}
 
 // Your Passphrase (#player): this browser's 8 words, to copy, download or keep in the browser's
 // passwords, and the words of another device to race as that player here (players.mjs).
@@ -1702,9 +1937,16 @@ async function init() {
   if (isWebApp()) log('started from the home screen (web app)');
   log('page loaded; crossOriginIsolated =', crossOriginIsolated, '; SharedArrayBuffer =', typeof SharedArrayBuffer);
   if (!crossOriginIsolated) {
+    // an app's own browser (Instagram, Facebook...) can't run it: say how to get to a real one
+    const app = inAppBrowser();
+    if (app) { showInApp(app); dl.notice = 'inapp'; log('in-app browser:', app); track('error', { kind: 'inapp', msg: app }); return; }
+    if (location.protocol === 'http:' && !/^(localhost|127\.)/.test(location.hostname)) {
+      status(`The game needs a secure (https) page: open https://${location.host}${location.pathname}`, true);
+      dl.notice = 'http'; track('error', { kind: 'browser', msg: 'http' }); return;
+    }
     // the server sends COOP/COEP (serve.mjs); a browser that still isn't isolated is too old or locked down
     status('This browser can\'t run the game: it is too old or a setting or extension blocks what the game needs (SharedArrayBuffer). Try an up-to-date Chrome, Edge, Firefox or Safari.', true);
-    track('error', { kind: 'browser', msg: 'not cross-origin isolated' });
+    dl.notice = 'not_isolated'; track('error', { kind: 'browser', msg: 'not cross-origin isolated' });
     return;
   }
   // no WebGL2 (hardware acceleration off, GPU blocklisted): the game would run behind a black screen
@@ -1715,11 +1957,22 @@ async function init() {
     log('no WebGL2'); track('error', { kind: 'browser', msg: 'no WebGL2' });
     return;
   }
-  if (!(await oneTab())) {
-    status('NFS4 is already open in another tab or window. Close that one, then reload this page.', true);
-    log('another tab has the game open'); return;
-  }
   if (!navigator.storage?.getDirectory) { status('This browser has no Origin Private File System support.', true); return; }
+  // Firefox private windows (and some privacy settings) refuse the storage the game files go in
+  try { await navigator.storage.getDirectory(); } catch (e) {
+    status(/Firefox/.test(navigator.userAgent)
+      ? 'Firefox private windows can\'t keep the game files (about 500 MB). Open this page in a normal Firefox window.'
+      : 'This browser won\'t let the page keep the game files (about 500 MB): a private window or a privacy setting blocks it. Open this page in a normal window.', true);
+    dl.notice = 'nostorage'; log('storage: not available:', e.name, e.message); track('error', { kind: 'nostorage', msg: `${e.name}: ${e.message}` });
+    return;
+  }
+  if (!(await oneTab())) {
+    status(`NFS4 is already open in another tab or window. Close that one${tabs ? ', or play here instead' : ''}: this page carries on by itself then.`, true);
+    log('another tab has the game open');
+    await waitTab();
+    status('');
+  }
+  holdTab();
   try { buildInfo = await (await fetch('dist/build-info.json', { cache: 'no-cache' })).json(); } catch {
     status('No recompiled build found in web/dist. Run ./build-web.sh first.', true); return;
   }
@@ -1752,12 +2005,23 @@ async function init() {
   // a server started with --game offers its game folder: import it automatically
   // ?devimport also forces the attempt and reports errors
   const forced = new URLSearchParams(location.search).has('devimport');
-  await checkPack();
+  // the game stopped last time because it couldn't open a file (noteCrash): check the files again
+  const crash = takeCrash();
+  if (crash) {
+    log(`the game stopped last time: ${crash.msg}; checking the game files again`);
+    await gameDir().then((d) => d.removeEntry('.pack-checked')).catch(() => {});
+  }
+  const repaired = (await checkPack()) || 0;
   if (await hasGame()) mark('files');
   const pack = await hasGame() ? null : await packSource();
   if (pack) {
     const d0 = performance.now();
-    try { await importPack(pack); track('import', { from: 'pack', secs: (performance.now() - d0) / 1000 }); } catch (err) { status(err.message, true); $('progress').hidden = true; log('game pack:', err.message); track('error', { kind: 'download', msg: err.message }); return; }
+    try { await importPack(pack); track('import', { from: 'pack', secs: (performance.now() - d0) / 1000 }); } catch (err) {
+      status(err.message, true); $('progress').hidden = true; $('dl-go').hidden = true; log('game pack:', err.message);
+      if (dl.state === 'downloading') dl.state = 'failed';
+      track('error', { kind: err.blocked ? dl.notice : 'download', msg: err.message, ...(err.info || {}) });
+      return;
+    }
     phase.download = Math.round((performance.now() - d0) / 100) / 10; mark('files');
   } else if (!(await hasGame()) && (forced || await serverHasGame())) {
     status('Downloading the game files into this browser…');
@@ -1771,7 +2035,18 @@ async function init() {
     if (settings.fullscreen && fsSupported() && !fsElement()) toggleFullscreen();   // only allowed inside the click
     start().catch((e) => { console.error(e); status('Failed to start: ' + e.message, true); $('start').disabled = false; }); });
   await refresh();
+  if (crash && gameHere) {
+    let free = Infinity;
+    try { const e = await navigator.storage.estimate(); if (e.quota) free = (e.quota - (e.usage || 0)) / MB; } catch {}
+    const file = crash.file || 'a file';
+    status(free < 100 ? `The game stopped: it couldn't save ${file}, because this browser's storage is full. Free some disk space, then start again.`
+      : repaired ? `The game stopped because some game files were missing or damaged (${file}). They have been downloaded again: start again.`
+      : `The game stopped: it couldn't open ${file}. Start again. If it happens again, choose Remove Game Files and let the page download them once more.`, true);
+    log(`after the stop: ${repaired} damaged file(s) downloaded again, ${Math.round(free)} MB free`);
+    track('error', { kind: 'crash_after', msg: file, repaired, free_mb: Number.isFinite(free) ? Math.round(free) : -1 });
+  }
   // the last race's replay, if it never went with its laps (replay-watch.js)
-  if (gameHere) me.ready.then(async () => sendLateReplay({ dir: await gameDir(), key: () => me.k, log })).catch(() => {});
+  const lapAt = () => { try { return Number(localStorage.getItem('nfs4.lapAt')) || 0; } catch { return 0; } };
+  if (gameHere) me.ready.then(async () => sendLateReplay({ dir: await gameDir(), key: () => me.k, lapAt, log })).catch(() => {});
 }
 init();
