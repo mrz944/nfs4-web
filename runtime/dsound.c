@@ -310,10 +310,16 @@ static void *web_audio_main(void *unused) {
             if (rd != last_rd) { last_rd = rd; rd_t = t; }
             if (level < lv_min) lv_min = level; if (level > lv_max) lv_max = level;
             uint64_t due_now = (t - t0) * OUT_RATE / 1000000000ull;
+            /* The steps are a share of the time since the last pass: this thread asks for 2 ms
+             * sleeps, but a browser on Windows wakes it every 16-18 ms, and a fixed step per pass
+             * then corrected only 0.012%. Windows sound devices often run 0.05% slow: the buffer
+             * filled up and dropped sound every few seconds. */
+            uint64_t dt = t - last; if (dt > 50000000ull) dt = 50000000ull;
             if (t - rd_t < 50000000ull) {
                 int64_t step = 0;
-                if (level > WEB_AHEAD + 1536) step = 2000;                         /* clock ahead of the speakers: slow it 0.1% */
-                else if (mixed > due_now + WEB_AHEAD + 1024) step = -2000;          /* speakers ahead of the clock (past the buffer they keep full): speed it up */
+                if (level > WEB_AHEAD + 3072) step = (int64_t)(dt / 250);            /* close to dropping: slow it 0.4% */
+                else if (level > WEB_AHEAD + 1536) step = (int64_t)(dt / 1000);     /* clock ahead of the speakers: slow it 0.1% */
+                else if (mixed > due_now + WEB_AHEAD + 1024) step = -(int64_t)(dt / 1000);   /* speakers ahead of the clock (past the buffer they keep full): speed it up */
                 if (step) { __atomic_add_fetch(&clock_skew_ns, step, __ATOMIC_RELAXED); t -= (uint64_t)step; }
             }
         }
@@ -348,7 +354,7 @@ static void *web_audio_main(void *unused) {
                 lv_min = UINT32_MAX; lv_max = 0; skew_min = sk; drops_min = 0; resyncs = 0; resync_worst_ms = 0;
             }
         }
-        usleep(2000);
+        rt_usleep(2000);                                               /* RT_TICK_MS: wakes like a browser on Windows */
     }
     return NULL;
 }
