@@ -182,6 +182,7 @@ How it all fits together: [ARCHITECTURE.md](ARCHITECTURE.md). Public hosting: [d
 | `tools/nettest.sh SOCK SECS "IN_A" "IN_B"` | two instances in one relay room (`node web/serve.mjs 8095 --relay-tcp build/relay.sock`) |
 | `RT_CURSOR_ADDR=689510` | scripted `CLICK@x;y` move from the game's real cursor (NFS4 moves it to the focused button itself) |
 | `RT_INPUT=…,MEMDUMP` | dump the exe's data/bss to `build/mem_<t>.bin` (reverse-engineering aid) |
+| `RT_INPUT=…,POKE@addr=value` | set a guest dword (hex), e.g. a game setting |
 | `RT_MULTICORE=1` | turn off single-core mode |
 | `RT_NO_DIRCACHE=1` | turn off the folder-listing cache |
 | `RT_GUARD=1` | fault on guest accesses past 512 MB, like the browser (natively they silently read zeros) |

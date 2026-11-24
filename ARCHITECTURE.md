@@ -42,6 +42,21 @@ savedata/ config.dat  DB/*.CDB  CARSPECS/  CARS/  RECORDS.DAT     (written by th
 The modern patch's `data/menus` must be merged into the CD's `data/MENUS`. Lookups are
 case-insensitive per path component, and two folders that differ only in case would hide one of them.
 
+`savedata/config.dat` is a straight copy of the settings block (`0x7c3c04`, `0x18a4` bytes, replay
+state cleared), the same block a replay file starts with.
+
+## Display modes (runtime/glide.c)
+
+The driver keeps 16 mode records (`{w, h, bpp, 4, available, colorBuffers, ...}`, 40 bytes);
+`glide_patch_driver` gives them the sharp 4:3 sizes. At start-up the driver (`0x60001730`, before
+rebasing) fills each record's buffer count from `grQueryResolutions`: the most color buffers any
+answer for that mode offers. The game's mode lookup (`0x51a530`, called from `0x4c261c` and
+`0x4c2bba`) takes the 4:3 mode nearest the saved width (`0x7c3d24`) with the saved depth
+(`0x7c3d28`), among those with at least `2 + tripplebuffer` buffers (`0x7c3d54`, Options ›
+Graphics › Triple Buffering). None left: "AMF=5 screen.c(563)", the game stops. So
+`grQueryResolutions` offers 3 buffers: offered 2, Triple Buffering stopped the game, and again at
+every start, since config.dat keeps it (22 players by 2026-11-24, from the first day).
+
 ## Single-core mode (runtime/core.c)
 
 NFS4 was written for one CPU. The patch's `SingleProcAffinity=1` pins it to one core on Windows.
@@ -157,3 +172,6 @@ those records led to their pointer table.
   start from the real position.
 - Some screens only accept a click after the cursor has hovered for a moment: `MOVE@`, then `CLICK@…+300`.
 - Player name: `data/TEXT/TEXT.ENG` string table entry "Player1"; `savedata/config.dat` 16 bytes at `0xF2C`.
+- A setting at start-up: write `savedata/config.dat` (the settings block from a `MEMDUMP`, changed).
+  Later: `POKE@addr=value` (hex) in `RT_INPUT`; at start-up it comes too early (the settings load
+  overwrites it).
