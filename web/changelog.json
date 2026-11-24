@@ -2,6 +2,10 @@
   "game": "NFS4 High Stakes",
   "about": "What changed on nfs4.xyz, day by day. Kinds: new, improved, fixed. Days run 05:00 to 05:00 Polish time. nfs3-webgl's tools/discord/changelog.mjs posts them to Discord.",
   "days": [
+    { "date": "2026-11-24", "items": [
+      ["fixed", "The game stopping with \"AMF=5 screen.c(563)\" after turning on Triple Buffering, and then at every start."],
+      ["improved", "When something blocks the game download (an ad blocker, VPN or network filter), the page says so and lets you choose your own game folder."]
+    ] },
     { "date": "2026-11-19", "items": [
       ["fixed", "Watching a replay no longer puts its laps on the Lap Records as yours."],
       ["improved", "The game download checks free space first, asks before using mobile data, and keeps going when the screen locks."],
