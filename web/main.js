@@ -173,11 +173,36 @@ const usable = () => new Promise((ok) => {
   };
   document.addEventListener('visibilitychange', check); addEventListener('online', check); check();
 });
+// index.json, the first request to the download host. When it fails ("Failed to fetch"), it
+// mostly fails within a second and on every visit: something between this browser and the host
+// blocks it (an ad blocker or privacy extension, a VPN, a school, work or country filter). Players'
+// logs show the same visitors failing again and again, and the bare "Failed to fetch" told them
+// nothing. Tried 3 times, then said as it is. (No no-cors probe: COEP require-corp blocks it too.)
+async function fetchIndex(base) {
+  const url = base + 'index.json', host = new URL(url, location.href).host, WAITS = [2, 5];
+  for (let attempt = 0; ; attempt++) {
+    const t = performance.now();
+    try { return await fetch(url); } catch (e) {
+      const ms = Math.round(performance.now() - t);
+      log(`game pack: ${host}/index.json failed (${e.name}: ${e.message}) after ${ms} ms, attempt ${attempt + 1}, ${navigator.onLine ? 'online' : 'offline'}${document.hidden ? ', page hidden' : ''}`);
+      if (attempt >= WAITS.length) {
+        dl.state = 'unreachable'; dl.notice = 'pack-host';
+        const err = new Error(`Can't reach the game download (${host}). Something on this device or network blocks it: an ad blocker or privacy extension, a VPN, or a school, work or country filter. Allow ${host} or try another network, then reload. Or choose your own NFS4 folder.`);
+        err.info = { host, ms, online: navigator.onLine };
+        err.blocked = true;                                  // analytics: kind pack-host
+        throw err;
+      }
+      status(`Can't reach the game download yet. Trying again in ${WAITS[attempt]} s…`);
+      await new Promise((ok) => setTimeout(ok, WAITS[attempt] * 1000));
+      await usable();
+    }
+  }
+}
 async function importPack(base) {
   status('Checking the game download…');
   // DecompressionStream: Safari 16.4 (iOS 16.4) and newer
   if (typeof DecompressionStream === 'undefined') throw stopped('This browser is too old to unpack the game download. Update it (on iPhone and iPad: iOS 16.4 or newer), then reload.', 'old');
-  const ir = await fetch(base + 'index.json');
+  const ir = await fetchIndex(base);
   if (!ir.ok) throw new Error(`Game download unavailable (${ir.status}). Reload to retry.`);
   const idx = await ir.json();
   if (idx.format !== 1) throw new Error('Unknown game pack format. Reload to retry.');
@@ -2019,6 +2044,7 @@ async function init() {
     try { await importPack(pack); track('import', { from: 'pack', secs: (performance.now() - d0) / 1000 }); } catch (err) {
       status(err.message, true); $('progress').hidden = true; $('dl-go').hidden = true; log('game pack:', err.message);
       if (dl.state === 'downloading') dl.state = 'failed';
+      $('pick-label').hidden = false;                       // their own folder still works
       track('error', { kind: err.blocked ? dl.notice : 'download', msg: err.message, ...(err.info || {}) });
       return;
     }
