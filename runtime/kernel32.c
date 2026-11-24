@@ -230,8 +230,10 @@ static uint32_t k_CreateFileA(CPU *c, const uint32_t *a) {
     if (fd >= 0 && !found && (fl & O_CREAT)) fs_changed(hp);
     if (fd < 0 && is_nul_device(gp)) fd = open("/tmp/rt-nul", O_RDWR | O_CREAT | O_TRUNC, 0644);  /* no /dev/null */
     if (fd < 0) {
-        if (rt_verbose) rt_log("CreateFileA(%s) -> not found (%s: %s)", gp, hp, strerror(errno));
-        tls_lasterr = ERROR_FILE_NOT_FOUND; return INVALID_HANDLE;
+        /* as Windows says it: CREATE_NEW on a file that is there is ERROR_FILE_EXISTS (80) */
+        int e = errno;
+        if (rt_verbose) rt_log("CreateFileA(%s) -> %s (%s: %s)", gp, e == EEXIST ? "already there" : "not found", hp, strerror(e));
+        tls_lasterr = e == EEXIST ? 80 : e == EACCES ? 5 : ERROR_FILE_NOT_FOUND; return INVALID_HANDLE;
     }
     if (fl != O_RDONLY) fs_wrote();                       /* opened to write (maybe truncated): other handles' buffers go */
     File *f = calloc(1, sizeof *f); f->fd = fd; snprintf(f->path, sizeof f->path, "%s", hp);
