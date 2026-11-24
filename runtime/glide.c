@@ -398,11 +398,18 @@ GL_(QueryResolutions) {
             if (fits) modes[nm++] = i;
         }
     }
+    /* Color buffers: 3 (triple buffering) unless the template asks for 2. NFS4's driver takes
+     * the most a mode offers as that mode's buffer count, and with Triple Buffering on in the
+     * game's graphics options (setting "tripplebuffer", 0x7c3d54) the game picks only modes
+     * with 3 (nfs4.exe 0x51a652): offered 2, it found no mode and stopped with "AMF=5
+     * screen.c(563)", and again at every start (config.dat keeps the setting). Our renderer
+     * has no real buffers to run out of. */
     uint32_t want = A(0) ? RD32(A(0)) : 0xFFFFFFFFu, n = 0;
+    uint32_t bufs = A(0) && RD32(A(0) + 8) == 2 ? 2 : 3;
     if (want > 0x17) want = 0xFFFFFFFFu;          /* not a GR_RESOLUTION_* code: list all */
     for (unsigned i = 0; i < nm; i++) {
         if (want != 0xFFFFFFFFu && want != modes[i]) continue;
-        if (A(1)) { uint32_t r[4] = { modes[i], 0, 2, 1 }; memcpy(G + A(1) + n * 16, r, 16); }
+        if (A(1)) { uint32_t r[4] = { modes[i], 0, bufs, 1 }; memcpy(G + A(1) + n * 16, r, 16); }
         n++;
     }
     static int logged; if (logged++ < 40) rt_log("grQueryResolutions(want %#x): %u mode(s)", want, n);
