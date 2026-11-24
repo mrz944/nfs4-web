@@ -140,6 +140,14 @@ static void *script_main(void *p) {
             rt_log("input: memory dump %s", p);
             continue;
         }
+        if (!strncasecmp(k, "POKE@", 5)) {          /* POKE@addr=value (hex): set a guest dword, e.g. a game setting (RE aid) */
+            char *eq = strchr(k, '='); if (!eq) continue;
+            uint32_t a = (uint32_t)strtoul(k + 5, NULL, 16), v = (uint32_t)strtoul(eq + 1, NULL, 16);
+            sleep_until_ms(t);
+            WR32(a, v);
+            rt_log("input: poke %#x = %#x", a, v);
+            continue;
+        }
         if (!strncasecmp(k, "JOY@", 4) || !strncasecmp(k, "JOYB@", 5)) {   /* controller 1: JOY@axis;value, JOYB@button+ms */
             typedef struct { uint32_t seq, connected, wheel; float axes[8]; uint32_t buttons; int32_t pov; char name[64]; } Pad;
             extern void *dinput_pads(void); Pad *pd = dinput_pads();
