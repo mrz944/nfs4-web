@@ -57,6 +57,10 @@ Graphics › Triple Buffering). None left: "AMF=5 screen.c(563)", the game stops
 `grQueryResolutions` offers 3 buffers: offered 2, Triple Buffering stopped the game, and again at
 every start, since config.dat keeps it (22 players by 2026-11-24, from the first day).
 
+Options › Graphics › **Wide Screen** (`0x7c3d5c`, on by default) is a letterbox: the main view
+keeps its 4:3 projection (centre moved up h/12, half-angle 52° instead of 45°) and is clipped to
+a centred 2:1 band (`f_005197D0`), the HUD drawn on the black bars.
+
 ## Hooks (runtime/hooks.txt, runtime/hooks.h)
 
 The code is lifted ahead of time, so the game's code is changed by replacing whole functions.
