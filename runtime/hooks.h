@@ -14,3 +14,4 @@
 void f_00453F10_orig(CPU *c);
 void f_0051A390_orig(CPU *c);
 void f_0051A530_orig(CPU *c);
+void f_00539F80_orig(CPU *c);

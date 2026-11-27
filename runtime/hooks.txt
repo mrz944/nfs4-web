@@ -4,3 +4,4 @@
 453f10 view_setup     # widescreen.c: view and projection setup (x, y, w, h, fov, ?, flip), ret 0x1c
 51a390 mode_list      # widescreen.c: lists the screen modes for Options > Graphics (callback in eax)
 51a530 mode_lookup    # widescreen.c: the saved width (eax) and depth (edx) -> mode record number
+539f80 camera_view    # widescreen.c: sets a camera's view (record, fov), then the camera's own zoom if it has one

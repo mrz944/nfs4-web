@@ -62,6 +62,17 @@ Options › Graphics › **Wide Screen** (`0x7c3d5c`, on by default) is a letter
 keeps its 4:3 projection (centre moved up h/12, half-angle 52° instead of 45°) and is clipped to
 a centred 2:1 band (`f_005197D0`), the HUD drawn on the black bars.
 
+**Hor+** (`runtime/widescreen.c`, hooks `view_setup` and `camera_view`). The view setup
+(`0x453F10`) takes the focal length from the width, `(w/2) / tan(fov)` with fov the half-angle
+across the width: a wider screen kept the horizontal view (Vert−). A view whose projection is the
+whole screen (the main record `0x853a10`'s w × h: main view, split-screen halves, intro and other
+full-screen cameras) now gets `f · min(1, ref · h / w)`, ref = 4/3, or 2 with Wide Screen on
+(its band is 2:1 at any aspect, so up to 2:1 it is the same picture as at 4:3). Views of other
+sizes (the mirror, `0x853a70`: the HUD's mirror rect × h/4) are left alone. Cameras with a zoom
+(`[camera + 0x54]`, after the setup: x focal = w/2 · zoom, y = h/2 · zoom · 1.348) get the same
+factor on x. Everything else reads the focal lengths `0x5b0950`/`0x5b0954` (projection,
+culling); only camera type 8 (`0x43a650`) writes them again, from a saved copy at `0x660fa8`.
+
 **Wide modes** (`runtime/widescreen.c`, hooks `mode_list` and `mode_lookup`). The game listed and
 looked up exact 4:3 modes only, and saves only the width. The Options list (`0x727524` count, at
 most 20; 276-byte entries from `0x727528`: `{mode number, w, h, depth, buffers ok, label}`) is
@@ -89,6 +100,7 @@ can't meet a stale `gen/`. Production needs the same re-lift after a merge.
 | Hook | Function | What |
 |---|---|---|
 | `view_setup` (`runtime/widescreen.c`) | `0x453F10` | view and projection setup (x, y, w, h, fov, n, flip; floats on the stack, `ret 0x1c`), one caller `0x539f23`. `RT_WS_LOG=1` logs each distinct call |
+| `camera_view` (`runtime/widescreen.c`) | `0x539F80` | a camera's view: record and fov (`0x539e10`: 90°, 75° with View Angle `0x7c3d50` = 1, +15° with Wide Screen; halved), then the camera's zoom (`[camera + 0x54]`) if any: Hor+ for the zoom too |
 | `mode_list` (`runtime/widescreen.c`) | `0x51A390` | the screen modes for Options › Graphics: all aspects, wide widths saved as `w \| h << 16` |
 | `mode_lookup` (`runtime/widescreen.c`) | `0x51A530` | saved width and depth → mode record: exact size, same aspect, then 4:3 |
 

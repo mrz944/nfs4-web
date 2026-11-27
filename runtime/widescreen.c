@@ -9,26 +9,71 @@ static int ws_logging(void) {
     return ws_log > 0;
 }
 
-/* 0x453F10: view setup (x, y, w, h, fov, n, flip), floats except flip, all on the stack, ret 0x1c.
+/* ---- Hor+ (P3) ----
+ * 0x453F10: view setup (x, y, w, h, fov, n, flip), floats except flip, all on the stack, ret 0x1c.
  * Sets the half sizes 0x5b0958/0x5b095c = w/2, h/2, the centre 0x680f98/0x680f9c = x + w/2,
- * y + h/2, and the focal length 0x5b0950 = (w / tan(fov * [0x5938d1])) / 2 (w/2 when fov is 0),
- * 0x5b0954 = -focal (the two swapped when flip). Focal from the width: a fixed horizontal FOV. */
+ * y + h/2, and the focal lengths 0x5b0950 = (w / tan(fov°)) / 2 (w/2 when fov is 0) and
+ * 0x5b0954 = -0x5b0950 (swapped when flip): fov is the half-angle across the width, so a wider
+ * screen kept the horizontal view and lost some vertical (Vert-).
+ * Hor+: a view whose projection is the whole screen (the main view, each split-screen half, the
+ * intro and other full-screen cameras: all made from the screen's record 0x853a10, w x h) gets
+ * the focal length of a 4:3 screen of the same height, f * (h * 4/3) / w, when the screen is
+ * wider than 4:3: the same vertical view as at 4:3, more at the sides. With Options > Graphics >
+ * Wide Screen (0x7c3d5c; not in split screen, 0x7c4bec) the view is a 2:1 band of width w
+ * (f_005197D0), so the reference is 2:1: up to 2:1 the band is the very picture it is at 4:3.
+ * 4:3 screens, and views of their own size (the mirror, the front end's), keep the original. */
+#define VIEW_MAIN   0x853a10u      /* {x, y, w, h, clip x, y, w, h}: w, h = the screen */
+#define WIDE_SCREEN 0x7c3d5cu
+#define SPLIT       0x7c4becu
+#define FOCAL_X     0x5b0950u
+#define FOCAL_Y     0x5b0954u
+static float ws_last_scale = 1;    /* the last view's Hor+ factor (camera_view's zoom uses it) */
+
 void hook_view_setup(CPU *c) {
+    uint32_t a[8];
+    for (int i = 0; i < 7; i++) a[i] = HOOK_ARG32(c, i);
+    a[7] = RD32(c->r[ESP]);
+    float w, h; memcpy(&w, &a[2], 4); memcpy(&h, &a[3], 4);
     if (ws_logging()) {
         static uint32_t seen[64][8]; static int nseen;
-        uint32_t a[8];
-        for (int i = 0; i < 7; i++) a[i] = HOOK_ARG32(c, i);
-        a[7] = RD32(c->r[ESP]);
         int k = 0; while (k < nseen && memcmp(seen[k], a, sizeof a)) k++;
         if (k == nseen && nseen < 64) {
             memcpy(seen[nseen++], a, sizeof a); ws_log--;
-            float x, y, w, h, fov, n; memcpy(&x, &a[0], 4); memcpy(&y, &a[1], 4); memcpy(&w, &a[2], 4);
-            memcpy(&h, &a[3], 4); memcpy(&fov, &a[4], 4); memcpy(&n, &a[5], 4);
+            float x, y, fov, n; memcpy(&x, &a[0], 4); memcpy(&y, &a[1], 4); memcpy(&fov, &a[4], 4); memcpy(&n, &a[5], 4);
             rt_log("ws: view_setup(x %g, y %g, w %g, h %g, fov %g, n %g, flip %u) from 0x%x",
                    x, y, w, h, fov, n, a[6], a[7]);
         }
     }
     f_00453F10_orig(c);
+    ws_last_scale = 1;
+    if (w == (float)(int32_t)RD32(VIEW_MAIN + 8) && h == (float)(int32_t)RD32(VIEW_MAIN + 12) && h > 0) {
+        float ref = RD32(WIDE_SCREEN) && RD32(SPLIT) != 1 ? 2.0f : 4.0f / 3.0f, s = ref * h / w;
+        if (s < 1) {
+            ws_last_scale = s;
+            WRF32(FOCAL_X, RDF32(FOCAL_X) * s); WRF32(FOCAL_Y, RDF32(FOCAL_Y) * s);
+        }
+    }
+}
+
+/* 0x539F80(eax = view {type, player, ...}): the view's record (type 1: the mirror, 0x853a70;
+ * else the main or split-screen one) through 0x51a2c0 -> 0x453F10, then, if the player's camera
+ * has a zoom (camera + 0x54), focal x = w/2 * zoom and focal y = -h/2 * zoom * 1.348 (0x5a9798,
+ * about 4/3: square at 4:3 only). Hor+ for those too: focal x times the view's factor. */
+#define CAM_A 0x661958u
+#define CAM_B 0x661950u
+void hook_camera_view(CPU *c) {
+    uint32_t view = c->r[EAX];
+    f_00539F80_orig(c);
+    if (ws_last_scale >= 1 || RD32(view) == 1) return;
+    uint32_t p = RD32(view + 4) * 4, cam = RD32(CAM_A + p) ? RD32(CAM_A + p) : RD32(CAM_B + p);
+    if (cam && (RD32(cam + 0x54) & 0x7fffffffu)) {
+        WRF32(FOCAL_X, RDF32(FOCAL_X) * ws_last_scale);
+        static uint32_t last; if (ws_logging() && RD32(cam + 0x54) != last) {
+            last = RD32(cam + 0x54); ws_log--;
+            rt_log("ws: camera_view zoom %g (camera type %u): focal %g, %g", RDF32(cam + 0x54), RD32(cam),
+                   RDF32(FOCAL_X), RDF32(FOCAL_Y));
+        }
+    }
 }
 
 /* ---- screen modes (P2) ----
