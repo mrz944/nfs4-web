@@ -12,3 +12,5 @@
 #define HOOK_ARGF(c, i)   RDF32((c)->r[ESP] + 4 + 4 * (i))
 
 void f_00453F10_orig(CPU *c);
+void f_0051A390_orig(CPU *c);
+void f_0051A530_orig(CPU *c);

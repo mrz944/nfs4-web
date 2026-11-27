@@ -355,14 +355,14 @@ void glide_patch_driver(uint32_t base, uint32_t size) {
     static const uint32_t first[4] = { 640, 480, 16, 4 };
     for (uint32_t m = 0; m + sizeof map <= size; m += 4) {
         if (memcmp(G + base + m, map, sizeof map)) continue;
-        /* NFS4 itself only lists exact 4:3 modes (nfs4.exe 0x51a4a5: w * 3 == h * 4) and draws
-         * them in 4:3 (a wider mode would only stretch the picture), so its codes carry sharp 4:3
-         * modes up to 2880x2160 instead of NFS3's widescreen set; the page pillarboxes them. The
-         * usual codes keep their sizes: 640x480 (7), 800x600 (8), 856x480 (10), 1024x768 (12),
-         * 1280x1024 (13), 1600x1200 (14). */
-        static const int w43[16] = { 1152, 1280, 1400, 1920, 2048, 2560, 2880, 640, 800, 960, 856, 1440, 1024, 1280, 1600, 1792 };
-        static const int h43[16] = {  864,  960, 1050, 1440, 1536, 1920, 2160, 480, 600, 720, 480, 1080,  768, 1024, 1200, 1344 };
-        for (int k = 0; k < 16; k++) { res_w[k] = w43[k]; res_h[k] = h43[k]; }
+        /* NFS4 itself listed only exact 4:3 modes; with the widescreen patch's hooks
+         * (runtime/widescreen.c: list, lookup, Hor+ projection) it gets 4:3, 16:9 and 16:10
+         * modes, here in record order (the order of Options > Graphics > Screen Size). Every
+         * old config still finds its 4:3 mode or the nearest one (the lookup prefers 4:3 for
+         * a plain saved width). Nothing wider than 16:9 (see res_w). */
+        static const int wrec[16] = { 640, 800, 1024, 1280, 1280, 1366, 1440, 1600, 1600, 1920, 1920, 1920, 2560, 2560, 2880, 3840 };
+        static const int hrec[16] = { 480, 600,  768,  720,  960,  768,  900,  900, 1200, 1080, 1200, 1440, 1440, 1600, 2160, 2160 };
+        for (int k = 0; k < 16; k++) { res_w[map[k]] = wrec[k]; res_h[map[k]] = hrec[k]; }
         for (int k = 16; k < NRES; k++) res_w[k] = res_h[k] = 0;
         for (uint32_t r = m >= 1024 ? m - 1024 : 0; r + 16 * 40 <= m; r += 4) {   /* a gap may follow the records */
             if (memcmp(G + base + r, first, sizeof first)) continue;

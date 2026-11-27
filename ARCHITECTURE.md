@@ -48,18 +48,30 @@ state cleared), the same block a replay file starts with.
 ## Display modes (runtime/glide.c)
 
 The driver keeps 16 mode records (`{w, h, bpp, 4, available, colorBuffers, ...}`, 40 bytes);
-`glide_patch_driver` gives them the sharp 4:3 sizes. At start-up the driver (`0x60001730`, before
-rebasing) fills each record's buffer count from `grQueryResolutions`: the most color buffers any
-answer for that mode offers. The game's mode lookup (`0x51a530`, called from `0x4c261c` and
-`0x4c2bba`) takes the 4:3 mode nearest the saved width (`0x7c3d24`) with the saved depth
-(`0x7c3d28`), among those with at least `2 + tripplebuffer` buffers (`0x7c3d54`, Options ›
-Graphics › Triple Buffering). None left: "AMF=5 screen.c(563)", the game stops. So
+`glide_patch_driver` gives them 4:3, 16:9 and 16:10 sizes (640x480 to 3840x2160, in the order of
+the Options list). At start-up the driver (`0x60001730`, before rebasing) fills each record's
+buffer count from `grQueryResolutions`: the most color buffers any answer for that mode offers.
+The game's mode lookup (`0x51a530`, called from `0x4c261c` and `0x4c2bba`) took the 4:3 mode
+nearest the saved width (`0x7c3d24`) with the saved depth (`0x7c3d28`), among those with at least
+`2 + tripplebuffer` buffers (`0x7c3d54`, Options › Graphics › Triple Buffering). None left:
+"AMF=5 screen.c(563)", the game stops. So
 `grQueryResolutions` offers 3 buffers: offered 2, Triple Buffering stopped the game, and again at
 every start, since config.dat keeps it (22 players by 2026-11-24, from the first day).
 
 Options › Graphics › **Wide Screen** (`0x7c3d5c`, on by default) is a letterbox: the main view
 keeps its 4:3 projection (centre moved up h/12, half-angle 52° instead of 45°) and is clipped to
 a centred 2:1 band (`f_005197D0`), the HUD drawn on the black bars.
+
+**Wide modes** (`runtime/widescreen.c`, hooks `mode_list` and `mode_lookup`). The game listed and
+looked up exact 4:3 modes only, and saves only the width. The Options list (`0x727524` count, at
+most 20; 276-byte entries from `0x727528`: `{mode number, w, h, depth, buffers ok, label}`) is
+built by `0x51a390` through the callback `0x487720`; picking an entry copies its width to
+`0x7c3d24`, and its index to `0x7c3d20`. The hooked list drops the 4:3 test (and the game's
+video-memory test, read nowhere else: `w·h·2 ≤ [0x5befa4] / (2 + tripplebuffer)`), and gives a
+mode that isn't 4:3 the width `w | h << 16` in its entry, so config.dat saves the height too. The
+hooked lookup takes the exact size, else the nearest width of the same aspect (a smaller screen
+since), else of 4:3 (plain widths: old configs, and new players' 640), else any. Races load and
+run at 16:9 and 21:9 (tested 2560x1080; NFS3 never finished loading wider than 16:9).
 
 ## Hooks (runtime/hooks.txt, runtime/hooks.h)
 
@@ -77,6 +89,8 @@ can't meet a stale `gen/`. Production needs the same re-lift after a merge.
 | Hook | Function | What |
 |---|---|---|
 | `view_setup` (`runtime/widescreen.c`) | `0x453F10` | view and projection setup (x, y, w, h, fov, n, flip; floats on the stack, `ret 0x1c`), one caller `0x539f23`. `RT_WS_LOG=1` logs each distinct call |
+| `mode_list` (`runtime/widescreen.c`) | `0x51A390` | the screen modes for Options › Graphics: all aspects, wide widths saved as `w \| h << 16` |
+| `mode_lookup` (`runtime/widescreen.c`) | `0x51A530` | saved width and depth → mode record: exact size, same aspect, then 4:3 |
 
 ## Single-core mode (runtime/core.c)
 
