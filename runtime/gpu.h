@@ -82,6 +82,7 @@ extern int g_gpu_active;                 /* the Glide path has produced frames *
 
 /* the renderer: draw the newest frame into the current framebuffer (out_w x out_h) */
 int gpu_render(int out_w, int out_h);    /* returns 1 if something new was drawn */
+void gpu_last_source(int *w, int *h);    /* the size of the frame gpu_render last drew */
 void gpu_ddraw_frame(const uint8_t *px, int w, int h, int pitch, int bpp);  /* software frames (movies, softtri) */
 GFrame *gpu_frame_new(void);
 void gpu_frame_free(GFrame *f);

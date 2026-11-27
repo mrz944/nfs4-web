@@ -448,6 +448,9 @@ static void letterbox(int out_w, int out_h, int src_w, int src_h, int *x, int *y
     *x = (out_w - *w) / 2; *y = (out_h - *h) / 2;
 }
 
+static int last_src_w = 640, last_src_h = 480;
+void gpu_last_source(int *w, int *h) { *w = last_src_w; *h = last_src_h; }
+
 int gpu_render(int out_w, int out_h) {
     if (!gl_ready) gl_init();
     renderer_seen = now_s();
@@ -486,6 +489,7 @@ int gpu_render(int out_w, int out_h) {
         if (fresh || !fbo) render_frame(shown);
     }
 
+    last_src_w = src_w; last_src_h = src_h;
     glBindFramebuffer(GL_FRAMEBUFFER, gpu_target_fbo);
     glViewport(0, 0, out_w, out_h);
     glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);

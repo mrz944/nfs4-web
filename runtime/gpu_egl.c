@@ -1,6 +1,8 @@
 /* Native headless GPU rendering for tests: with RT_HEADLESS=1 RT_DUMP=N the
  * Glide frames are rendered offscreen (EGL, surfaceless Mesa) on the game
- * thread and every Nth one is written to build/frames/gNNNNN.ppm. */
+ * thread and every Nth one is written to build/frames/gNNNNN.ppm.
+ * RT_DUMP_H=H: the dump's height (default 480), its width follows the frame's
+ * aspect (a 1280x720 race dumps 853x480); RT_DUMP_H=0: the frame's own size. */
 #if !defined(__EMSCRIPTEN__) && !defined(RT_NO_SDL)
 #define _GNU_SOURCE
 #include "rt.h"
@@ -20,7 +22,7 @@ void gpu_headless_frame(GFrame *unused) {
         if (every <= 0) every = 0;
     }
     if (!every || ++n % every) return;
-    static EGLDisplay dpy; static int ok = -1; static GLuint fb, rb;
+    static EGLDisplay dpy; static int ok = -1; static GLuint fb, rb; static int fw, fh;
     if (ok < 0) {
         ok = 0;
         PFNEGLGETPLATFORMDISPLAYEXTPROC gpd = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
@@ -34,22 +36,33 @@ void gpu_headless_frame(GFrame *unused) {
         EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, xa);
         if (!ctx || !eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) { rt_log("gpu headless: no EGL context"); return; }
         glGenFramebuffers(1, &fb); glGenRenderbuffers(1, &rb);
-        glBindRenderbuffer(GL_RENDERBUFFER, rb); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 640, 480);
-        glBindFramebuffer(GL_FRAMEBUFFER, fb); glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
         ok = 1;
     }
     if (!ok) return;
+    static int dump_h = -1;
+    if (dump_h < 0) { const char *e = getenv("RT_DUMP_H"); dump_h = e ? atoi(e) : 480; if (dump_h < 0) dump_h = 480; }
     gpu_target_fbo = fb;
-    gpu_render(640, 480);
+    /* draw, then if the frame's size wants another dump size, resize and draw again (a redraw
+       of the same frame only blits it) */
+    for (int pass = 0; pass < 2; pass++) {
+        if (fw) gpu_render(fw, fh);
+        int sw, sh; gpu_last_source(&sw, &sh);
+        int w = dump_h ? (int)((double)dump_h * sw / sh + 0.5) : sw, h = dump_h ? dump_h : sh;
+        if (fw && w == fw && h == fh) break;
+        fw = w; fh = h;
+        glBindRenderbuffer(GL_RENDERBUFFER, rb); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, fw, fh);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb); glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+        if (pass) gpu_render(fw, fh);
+    }
     gpu_renderer_seen_reset = 1;
-    static uint8_t px[640 * 480 * 4];
+    uint8_t *px = malloc((size_t)fw * fh * 4); if (!px) return;
     glBindFramebuffer(GL_FRAMEBUFFER, fb);
-    glReadPixels(0, 0, 640, 480, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px);
     const char *dir = getenv("RT_DUMP_DIR") ? getenv("RT_DUMP_DIR") : "build/frames";
     char path[512]; snprintf(path, sizeof path, "%s/g%06d.ppm", dir, n);
-    FILE *f = fopen(path, "wb"); if (!f) return;
-    fprintf(f, "P6\n640 480\n255\n");
-    for (int y = 479; y >= 0; y--) for (int x = 0; x < 640; x++) fwrite(px + (y * 640 + x) * 4, 1, 3, f);
-    fclose(f);
+    FILE *f = fopen(path, "wb"); if (!f) { free(px); return; }
+    fprintf(f, "P6\n%d %d\n255\n", fw, fh);
+    for (int y = fh - 1; y >= 0; y--) for (int x = 0; x < fw; x++) fwrite(px + ((size_t)y * fw + x) * 4, 1, 3, f);
+    fclose(f); free(px);
 }
 #endif
