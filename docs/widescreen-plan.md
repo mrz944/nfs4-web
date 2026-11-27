@@ -28,7 +28,7 @@ A player with an old config.dat keeps their 4:3 mode; nothing changes until they
 | P0 | Staging up, baseline screenshots | ☑ 2026-11-27 |
 | P1 | Hooks: lifted functions replaced by runtime C | ☑ 2026-11-27 |
 | P2 | Wide modes offered and selectable | ☑ 2026-11-27 |
-| P3 | Hor+ projection | ☐ |
+| P3 | Hor+ projection | ☑ 2026-11-27 (replay TV cameras: check in P6) |
 | P4 | Culling, clipping, effects at the new edges | ☐ |
 | P5 | HUD and 2D overlays | ☐ |
 | P6 | Mirror, split screen, replays, pause and race-end screens | ☐ |
@@ -210,7 +210,32 @@ the function returns a float.
 - Check: frames at 1280x960 and 1280x720 from the same spot: the 720 frame shows the same
   vertical content and more at the sides, no stretching (round wheels, round signs).
 
-**Done when**: every camera is Hor+. **Findings**:
+**Done when**: every camera is Hor+. **Findings** (2026-11-27):
+
+- `hook_view_setup` scales the focal lengths of a full-screen view (projection w × h = the main
+  record `0x853a10`'s, i.e. the screen: main view, both split-screen halves, the intro's views,
+  `0x539f30`'s fov-120 view) by `min(1, ref·h/w)`, ref 4/3, or 2 with Wide Screen on (not in
+  split screen). 4:3 screens: untouched. `hook_camera_view` (`0x539f80`) gives a camera's zoom
+  path the same factor on x.
+- **FOV** comes from `f_00539E10`: 90°, 75° with View Angle (`0x7c3d50` = 1), +15° with Wide
+  Screen, halved (45/37/52/45); `n` = fov·13/16. The intro has a fov-40 view. The Hor+ factor is
+  relative, so View Angle keeps working.
+- **Wide Screen at 16:9** keeps the original: its band is w × w/2, so it's the same 2:1 picture
+  as at 4:3, now with 40-pixel bars at 1280x720. (Wider than 2:1 it would turn Hor+ against 2:1;
+  no such mode now.) Decided this way instead of a Hor+ letterbox (a 2.67:1 strip at 16:9).
+- Checked natively (frames in `build/baseline/p3-*`): the grid at the countdown in the cockpit at
+  1280x960 and 1280x720: the same tunnel roof and steering wheel heights, more at the sides
+  (A-pillar, door mirror); chase camera at 16:9; Wide Screen on at 4:3 and 16:9: the same band
+  picture; split screen at 1280x720 (Split Screen Arcade: the name dialog twice, Ok at 290,294):
+  both halves Hor+, race runs.
+- **Not covered here**: the mirror (`0x853a70`, projection = the HUD's mirror rect × h/4: its
+  shape at 16:9 follows the HUD's scaling: P5/P6); the zoom path didn't run in any race camera
+  or the intro (log `ws: camera_view zoom` with RT_WS_LOG=1): likely the replays' TV cameras, to
+  check in P6. Camera type 8 (`0x43a650`) restores focal and centre from a copy at `0x660fa8`
+  whose writer I didn't find (no direct stores): check in P6 whether it ever shows.
+- Readers of the focal lengths (projection, probably culling: 26 places) follow by themselves;
+  the half sizes are read only by the setup and the zoom path. P4 starts from those readers.
+- 2D overlays drawn in the 3D pass are stretched at 16:9: the start lights, the HUD (P5).
 
 ## P4: culling, clipping, effects
 
