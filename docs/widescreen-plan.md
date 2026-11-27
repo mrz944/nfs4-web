@@ -27,7 +27,7 @@ A player with an old config.dat keeps their 4:3 mode; nothing changes until they
 |---|---|---|
 | P0 | Staging up, baseline screenshots | ☑ 2026-11-27 |
 | P1 | Hooks: lifted functions replaced by runtime C | ☑ 2026-11-27 |
-| P2 | Wide modes offered and selectable | ☐ |
+| P2 | Wide modes offered and selectable | ☑ 2026-11-27 |
 | P3 | Hor+ projection | ☐ |
 | P4 | Culling, clipping, effects at the new edges | ☐ |
 | P5 | HUD and 2D overlays | ☐ |
@@ -167,7 +167,36 @@ the function returns a float.
   in glide.c says NFS3 never finished loading a race wider than 16:9; find out NFS4's limit),
   the picture fills 16:9 (stretched until P3), menus still 640x480.
 
-**Done when**: wide modes listed, saved, restored after restart. **Findings**:
+**Done when**: wide modes listed, saved, restored after restart. **Findings** (2026-11-27):
+
+- Hooks `mode_list` (`0x51a390`) and `mode_lookup` (`0x51a530`) in `runtime/widescreen.c`, no
+  byte patches. The 16 records (in Options order): 4:3 640x480, 800x600, 1024x768, 1280x960,
+  1600x1200, 1920x1440, 2880x2160; 16:9 1280x720, 1366x768, 1600x900, 1920x1080, 2560x1440,
+  3840x2160; 16:10 1440x900, 1920x1200, 2560x1600. Dropped 4:3: 960x720, 1152x864, 1400x1050,
+  1440x1080, 1792x1344, 2048x1536, 2560x1920 (old configs get the nearest 4:3: 1152 → 1024x768).
+- **The record count stays 16**: the records are a fixed array in the driver followed by the
+  record → GR_RESOLUTION code map, which the driver indexes by record. The Options list holds
+  at most 20 entries (`cmp [0x727524], 0x14` in the callback).
+- **The height**: only the width is saved (`0x7c3d24`, read only at `0x4c2bb0` for the lookup;
+  `0x7c3d20` is the entry index, which shifts when RT_SCREEN changes the list). The list's
+  entries are 276 bytes (not 260), `{mode number, w, h, depth, buffers ok, "%d x %d x %d (z)"}`;
+  for a non-4:3 mode the hook stores `w | h << 16` as the entry's width, which the menu copies
+  to `0x7c3d24` and config.dat. Lookup: exact size, else nearest width of the same aspect, else
+  4:3, else any. Checked: plain 1280 → 1280x960; 1152 → 1024x768; 2560x1440 with
+  RT_SCREEN=1920x1080 → 1920x1080; 3840x2160 with Triple Buffering → 3840x2160. A production
+  build reading a staging config with a wide mode would take the encoded value as a huge
+  width (its nearest 4:3 = the biggest mode that fits): harmless, and staging's OPFS is
+  separate anyway (other origin).
+- The game's video-memory check in the list (`w·h·2 ≤ [0x5befa4]/(2+tb)`, `0x5befa4` read
+  nowhere else) is dropped: with it 3840x2160 (and 2880x2160 with Triple Buffering) never showed.
+- Menu test natively (Options › Graphics › Screen Size, the drop-down lists all 16 with a scroll
+  bar; labels fit): picked 1280 x 720, Done, Exit Game → config.dat width `0x2d00500`, index 3;
+  restarted: lookup → 1280x720, the race opens at 1280x720. New players still start at 640x480.
+- Races load and run at 1280x720, 3840x2160 (Triple Buffering, 64 fps natively) and **21:9**
+  (2560x1080, tested in a temporary slot): NFS4 has no 16:9 limit like NFS3. Picture: square
+  pixels, Vert− (P3), HUD stretched sideways (P5), the tachometer needle overshoots its dial at
+  21:9. A 21:9 slot would cost one of the 16 (1366x768 or 1440x900): decide after P5.
+- With Wide Screen on at 16:9 the 2:1 band leaves 40-pixel bars (1280x720: view y −20, h 720).
 
 ## P3: Hor+
 
