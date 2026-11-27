@@ -9,7 +9,7 @@ GAME="${1:-game}"
 [ -f deps/emsdk/emsdk_env.sh ] && . deps/emsdk/emsdk_env.sh >/dev/null 2>&1
 [ -x /usr/lib/emscripten/emcc ] && PATH="/usr/lib/emscripten:$PATH"   # Arch/CachyOS package
 command -v emcc >/dev/null || { echo "emcc not found: install Emscripten (see README / build notes)"; exit 1; }
-[ -f gen/modules.c ] || ./build.sh "$GAME"          # lifts the modules (shared with the native build)
+LIFT_ONLY=1 ./build.sh "$GAME"                      # lifts the modules if needed (shared with the native build)
 mkdir -p build/wasm-obj web/dist
 CFLAGS="-O3 -w -fno-strict-aliasing -pthread -Iruntime -DRT_NO_SDL"
 ls gen/*/*.c gen/modules.c runtime/*.c | xargs -P"$(nproc)" -I{} sh -c '

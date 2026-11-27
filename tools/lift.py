@@ -1,10 +1,16 @@
 """x86 -> C static recompiler.
 
-usage: python -I tools/lift.py <exe or dll> <outdir> [--name N] [--base HEX] [--seeds FILE]
+usage: python -I tools/lift.py <exe or dll> <outdir> [--name N] [--base HEX] [--seeds FILE] [--hooks FILE]
 
 Each guest function becomes `void f_XXXXXXXX(CPU *c)`. Flags are function
 locals (clang removes the dead ones); registers live in CPU. Unsupported
 instructions become x86_trap() calls and are counted in the report.
+
+--hooks FILE (runtime/hooks.txt): lines `<hex address> <name>`. Each listed function
+in this module is emitted as `f_XXXXXXXX_orig` (the lifted code, unchanged) and
+`f_XXXXXXXX` becomes a call to `hook_<name>(c)`, so direct calls, tail jumps and
+the dispatch table all reach the runtime's hook, which may call the original.
+Addresses outside this module's image are skipped (one list serves every module).
 """
 import re
 import collections
@@ -54,6 +60,7 @@ class Emitter:
         self.img = prog.img
         self.unsupported = collections.Counter()
         self.func_set = set(prog.funcs)
+        self.hooks = {}           # function start -> hook name
 
     # ---------- operands ----------
     def rn(self, ins, r):
@@ -622,7 +629,8 @@ class Emitter:
 
     def function_raw(self, f):
         labels = set(f.blocks)
-        out = [f"void f_{f.start:08X}(CPU *c) {{",
+        suffix = "_orig" if f.start in self.hooks else ""
+        out = [f"void f_{f.start:08X}{suffix}(CPU *c) {{",
                "    uint32_t cf = c->cf, zf = c->zf, sf = c->sf, of = c->of, pf = c->pf;",
                "    (void)cf; (void)zf; (void)sf; (void)of; (void)pf;",
                f"    TRACE_ENTER(0x{f.start:X}u);",
@@ -685,14 +693,38 @@ def promote_registers(text):
     return text
 
 
-def main(exe, outdir, seeds=(), modname="nfs4", base=None):
+def read_hooks(path, img):
+    """{address: name} for the hook list's entries inside this image"""
+    hooks = {}
+    with open(path) as fp:
+        for n, line in enumerate(fp, 1):
+            line = line.split("#", 1)[0].split()
+            if not line:
+                continue
+            if len(line) != 2 or not re.fullmatch(r"[A-Za-z_]\w*", line[1]):
+                sys.exit(f"{path}:{n}: expected `<hex address> <name>`")
+            a = int(line[0], 16)
+            if img.in_image(a):
+                if not img.is_code(a):
+                    sys.exit(f"{path}:{n}: 0x{a:X} is not code")
+                hooks[a] = line[1]
+    return hooks
+
+
+def main(exe, outdir, seeds=(), modname="nfs4", base=None, hooks_path=None):
     img = Image(exe, base)
+    hooks = read_hooks(hooks_path, img) if hooks_path else {}
     prog = Program(img)
-    prog.run(seeds)
+    prog.run(list(seeds) + [a for a in hooks if a not in seeds])
+    for a in hooks:
+        if a not in prog.funcs:
+            sys.exit(f"hook at 0x{a:X}: not a function start")
     em = Emitter(prog)
+    em.hooks = hooks
     os.makedirs(outdir, exist_ok=True)
     funcs = sorted(prog.funcs.values(), key=lambda f: f.start)
     hdr = ["#pragma once", '#include "cpu.h"', '#include "lifted.h"'] + [f"void f_{f.start:08X}(CPU *c);" for f in funcs]
+    hdr += [f"void f_{a:08X}_orig(CPU *c); void hook_{n}(CPU *c);" for a, n in sorted(hooks.items())]
     with open(os.path.join(outdir, "funcs.h"), "w") as fp:
         fp.write("\n".join(hdr) + "\n")
     CHUNK = 150
@@ -702,6 +734,8 @@ def main(exe, outdir, seeds=(), modname="nfs4", base=None):
             fp.write('#include "funcs.h"\n\n')
             for f in funcs[i : i + CHUNK]:
                 fp.write(em.function(f) + "\n\n")
+                if f.start in hooks:
+                    fp.write(f"void f_{f.start:08X}(CPU *c) {{ hook_{hooks[f.start]}(c); }}\n\n")
         nfiles += 1
     with open(os.path.join(outdir, "dispatch.c"), "w") as fp:
         fp.write('#include "funcs.h"\n#include <stddef.h>\n')
@@ -711,7 +745,8 @@ def main(exe, outdir, seeds=(), modname="nfs4", base=None):
         fp.write(f"const size_t g_functab_{modname}_len = {len(funcs)};\n")
     n = sum(len(b) for f in funcs for b in f.blocks.values())
     bad = sum(em.unsupported.values())
-    print(f"lifted {len(funcs)} functions, {n} instructions into {nfiles} files")
+    print(f"lifted {len(funcs)} functions, {n} instructions into {nfiles} files"
+          + (f", hooks: {', '.join(f'0x{a:X} {h}' for a, h in sorted(hooks.items()))}" if hooks else ""))
     print(f"unsupported: {bad} ({100 * bad / max(n, 1):.3f}%)  {dict(em.unsupported.most_common(20))}")
 
 
@@ -723,4 +758,5 @@ if __name__ == "__main__":
             seeds = [a for a in (int(l, 16) for l in fp if l.strip()) if img_lo.is_code(a)]
     name = sys.argv[sys.argv.index("--name") + 1] if "--name" in sys.argv else "nfs4"
     base = int(sys.argv[sys.argv.index("--base") + 1], 16) if "--base" in sys.argv else None
-    main(sys.argv[1], sys.argv[2], seeds, name, base)
+    hooks_path = sys.argv[sys.argv.index("--hooks") + 1] if "--hooks" in sys.argv else None
+    main(sys.argv[1], sys.argv[2], seeds, name, base, hooks_path)

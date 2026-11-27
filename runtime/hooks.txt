@@ -1,0 +1,4 @@
+# Lifted functions replaced by runtime C (tools/lift.py --hooks, ARCHITECTURE.md "Hooks").
+# <hex address> <name>: f_<address> calls hook_<name>(c); the lifted code stays as f_<address>_orig.
+# Changing this list re-lifts the modules on the next ./build.sh (production too, after a merge).
+453f10 view_setup     # widescreen.c: view and projection setup (x, y, w, h, fov, ?, flip), ret 0x1c

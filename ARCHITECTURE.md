@@ -57,6 +57,23 @@ Graphics › Triple Buffering). None left: "AMF=5 screen.c(563)", the game stops
 `grQueryResolutions` offers 3 buffers: offered 2, Triple Buffering stopped the game, and again at
 every start, since config.dat keeps it (22 players by 2026-11-24, from the first day).
 
+## Hooks (runtime/hooks.txt, runtime/hooks.h)
+
+The code is lifted ahead of time, so the game's code is changed by replacing whole functions.
+`runtime/hooks.txt` lists them (`<hex address> <name>`); `tools/lift.py --hooks` emits each one's
+lifted body as `f_<addr>_orig` and makes `f_<addr>` call `hook_<name>(c)`, so direct calls, tail
+jumps and the dispatch table (indirect calls) all reach the hook. The hook runs at the function's
+entry (return address at `[esp]`, arguments as the caller left them, `HOOK_ARG32`/`HOOK_ARGF`)
+and either calls `f_<addr>_orig(c)` or does the work itself, returning as the original would
+(`ret N` pops, registers, x87 results). One list serves all modules: entries outside a module's
+image are skipped. `build.sh` keeps a copy of the list in `gen/<module>/hooks.txt` and re-lifts
+when it differs (~1 minute); `build-web.sh` goes through it (`LIFT_ONLY=1`), so a changed list
+can't meet a stale `gen/`. Production needs the same re-lift after a merge.
+
+| Hook | Function | What |
+|---|---|---|
+| `view_setup` (`runtime/widescreen.c`) | `0x453F10` | view and projection setup (x, y, w, h, fov, n, flip; floats on the stack, `ret 0x1c`), one caller `0x539f23`. `RT_WS_LOG=1` logs each distinct call |
+
 ## Single-core mode (runtime/core.c)
 
 NFS4 was written for one CPU. The patch's `SingleProcAffinity=1` pins it to one core on Windows.

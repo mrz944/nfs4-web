@@ -2,6 +2,9 @@
 # Native (Linux) build of the recompiled game, for bring-up and debugging.
 #   ./build.sh <game dir>        lift (if needed) + compile
 #   RELIFT=1 ./build.sh <dir>    force re-lift
+# runtime/hooks.txt lists lifted functions replaced by runtime C (tools/lift.py --hooks): when it
+# changes, the modules are re-lifted by themselves (a copy of the list is kept in gen/<module>/).
+#   LIFT_ONLY=1 ./build.sh <dir> lift if needed, no compile (build-web.sh)
 # Lifted modules: nfs4.exe, EA sound (eacsnd.dll) and the Glide3 thrash driver (drivers/glide3x/voodoo2a.dll).
 set -e
 cd "$(dirname "$0")"
@@ -11,8 +14,9 @@ SEEDS=""; [ -f build/missing.txt ] && SEEDS="--seeds build/missing.txt"
 MODULES="nfs4:nfs4.exe:400000 eacsnd:eacsnd.dll:b00000 voodoo2a:drivers/glide3x/voodoo2a.dll:c00000"
 for m in $MODULES; do
   n=${m%%:*}; r=${m#*:}; pe=${r%%:*}; base=${r##*:}
-  if [ ! -f "gen/$n/dispatch.c" ] || [ -n "$RELIFT" ]; then
-    rm -rf "gen/$n"; .venv/bin/python -I tools/lift.py "$GAME/$pe" "gen/$n" $SEEDS --name "$n" --base "$base"
+  if [ ! -f "gen/$n/dispatch.c" ] || [ -n "$RELIFT" ] || ! cmp -s runtime/hooks.txt "gen/$n/hooks.txt"; then
+    rm -rf "gen/$n"; .venv/bin/python -I tools/lift.py "$GAME/$pe" "gen/$n" $SEEDS --name "$n" --base "$base" --hooks runtime/hooks.txt
+    cp runtime/hooks.txt "gen/$n/hooks.txt"
   fi
 done
 {
@@ -24,6 +28,7 @@ done
     echo "  {\"$(basename "$pe")\", g_functab_$n, &g_functab_${n}_len, 0x${base}u},"; done
   echo '  {0}};'
 } > gen/modules.c
+[ -n "$LIFT_ONLY" ] && exit 0                       # build-web.sh: lift only
 mkdir -p build/obj
 CFLAGS="-O2 -g -w -fno-strict-aliasing -Iruntime $(pkg-config --cflags sdl2 2>/dev/null)"
 ls gen/*/*.c gen/modules.c runtime/*.c | xargs -P"$(nproc)" -I{} sh -c '
