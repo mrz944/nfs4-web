@@ -29,7 +29,7 @@ A player with an old config.dat keeps their 4:3 mode; nothing changes until they
 | P1 | Hooks: lifted functions replaced by runtime C | ☑ 2026-11-27 |
 | P2 | Wide modes offered and selectable | ☑ 2026-11-27 |
 | P3 | Hor+ projection | ☑ 2026-11-27 (replay TV cameras: check in P6) |
-| P4 | Culling, clipping, effects at the new edges | ☐ |
+| P4 | Culling, clipping, effects at the new edges | ☑ 2026-11-28 (nothing to change) |
 | P5 | HUD and 2D overlays | ☐ |
 | P6 | Mirror, split screen, replays, pause and race-end screens | ☐ |
 | P7 | Page, defaults, settings migration | ☐ |
@@ -251,7 +251,27 @@ With a wider view, things culled for a 4:3 frustum pop in at the edges. Find and
 - Check: drive the edges of a few tracks (Celtic Ruins, Hometown, Empire City), compare with 4:3
   frames for pop-in; sunset/sunrise tracks for the flare.
 
-**Done when**: nothing pops at the sides on three tracks. **Findings**:
+**Done when**: nothing pops at the sides on three tracks. **Findings** (2026-11-28):
+
+- **Nothing to change.** Projection and screen clipping (`f_00453FB0`: outcodes against the
+  viewport rect `0x680f78`–`0x680f94`) follow the focal length and the screen, and so does the
+  culling: Celtic Ruins at 2560x1080 (21:9, ±60° across) and at 4:3 with only focal x × 0.35
+  (±71° across, a temporary hack, removed) has walls, ground, trees and cars right alongside
+  drawn to the frame edges. (Scaling both focals widens the vertical view too, and then the
+  ground under and behind the camera is missing at the bottom: irrelevant, Hor+ keeps 4:3's
+  vertical view.)
+- Checked at 1280x720, autopilot, chase camera (contact sheets in `build/baseline/p4-*`): Celtic
+  Ruins, Germany (town buildings to the edges), Coastal (lighthouse beam, sparks), Snowy with
+  weather (snow over the whole width), night (tail-light glows round, the moon). The sun is a
+  projected sprite: round and the same size relative to the height as at 4:3; no separate flare
+  elements showed in either.
+- **Hometown and Empire City are locked** in a fresh savedata (track `+0x10e0` = 10 or 18 races
+  Celtic Ruins), so Germany and Coastal stood in. Track indices (`0x5ba21c`): 0 Hills (Celtic
+  Ruins), 1 Germany, 2 Coastal, 3 Park, 4 France, 5 Uk, 6 Snowy, 7–9 Gt1–3, 10 Hometown,
+  11 Redrock, 12 Atlantic, 13 RockyPas, 14 Country, 15 LostCany, 16 Aquatica, 17 Summit, 18 Empire.
+- Test configs: `build/configs/1280x720-nolb-{germany,coastal,snowy-weather,night}.dat` (night
+  `+0x10f4`, weather `+0x10f8`). Contact sheets were made with a small scratch montage script
+  (nearest-neighbour downscale, tiled PPM); add it to tools/ if P5 needs more of them.
 
 ## P5: HUD and 2D overlays
 
