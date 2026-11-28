@@ -2,6 +2,7 @@
  * (runtime/hooks.txt). 4:3 frames keep the original code path.
  *   RT_WS_LOG=1   log the hooks' arguments (each distinct set once, up to 64) */
 #include "hooks.h"
+#include <math.h>
 
 static int ws_log = -1;
 static int ws_logging(void) {
@@ -153,4 +154,137 @@ void hook_mode_lookup(CPU *c) {
     if (!pick) { c->r[EAX] = ww; f_0051A530_orig(c); return; }   /* nothing usable: the game's own error */
     c->r[EAX] = pick;
     c->r[ESP] += 4;
+}
+
+/* ---- HUD (P5) ----
+ * The HUD's elements (16, in 5 layouts: Options > Heads Up Display, 0x7c3d6c) have rects given
+ * as fractions of the screen, {y0, x0, y1, x1} floats at 0x7cb0bc + element * 160 + layout * 32
+ * (read from the HUD layout file by 0x4d0310), and 0x4d0550 turns them into pixels at +0x10:
+ * x * W, y * H (W, H: the full-screen record 0x853a98/0x853a9c), clamped to the screen. On a
+ * screen wider than 4:3 that stretched every element sideways. Now x is laid out on a 4:3 strip
+ * (H * 4/3 wide) and each element moves with the screen edge it belongs to: the left third's to
+ * the left edge, the right third's to the right, the rest stays centred. The drawing code
+ * sizes the gauges, boxes and text from these rects. */
+#define HUD_TABLE  0x7cb0bcu
+#define SCREEN_W   0x853a98u
+#define SCREEN_H   0x853a9cu
+static int hud_real_w;              /* the real screen width while the game is told 4:3, else 0 */
+static int screen_w(void) { return hud_real_w ? hud_real_w : (int)RD32(SCREEN_W); }
+void hook_hud_layout(CPU *c) {
+    int W = screen_w(), H = (int)RD32(SCREEN_H);
+    if (hud_real_w) WR32(SCREEN_W, (uint32_t)W);     /* the original's clamps: the real screen */
+    f_004D0550_orig(c);
+    if (hud_real_w) WR32(SCREEN_W, (uint32_t)(H * 4 + 1) / 3);
+    if (W * 3 <= H * 4 || H <= 0) return;
+    float w43 = H * 4.0f / 3.0f, off = W - w43;
+    for (int e = 0; e < 16; e++) for (int l = 0; l < 5; l++) {
+        uint32_t a = HUD_TABLE + 160u * e + 32u * l;
+        float x0 = RDF32(a + 4), x1 = RDF32(a + 12), cx = (x0 + x1) / 2;
+        float shift = cx < 1.0f / 3 ? 0 : cx > 2.0f / 3 ? off : off / 2;
+        float p0 = rintf(w43 * x0) + shift, p1 = rintf(w43 * x1) + shift;   /* fistp: round to nearest */
+        if (p0 < 0) p0 = 0;
+        if (p1 > W - 1) p1 = (float)(W - 1);
+        WRF32(a + 16 + 4, p0); WRF32(a + 16 + 12, p1);
+    }
+}
+
+/* 0x4CE720: the HUD's set-up. Scales from the screen: 0x7cb088 = W/640 (the x scale of
+ * everything drawn inside the elements: text, bars, needles), 0x7cb08c = H/480 (y), 0x7cb084 =
+ * W * 6/640, 0x7cb07c = H/30, 0x7cb080 = H/80, and font sizes (0x52f950: W/320). On a wide
+ * screen it runs with the game told the screen is 4:3 (H * 4/3 wide), so all of those keep the
+ * HUD's proportions; the element rects (hud_layout, called from it) still use the real width. */
+static float hud_off;               /* W - H * 4/3 while the game is told 4:3 */
+static void hud_begin(int W, int H) { hud_real_w = W; hud_off = (float)(W - (H * 4 + 1) / 3); WR32(SCREEN_W, (uint32_t)(H * 4 + 1) / 3); }
+static void hud_end(void) { WR32(SCREEN_W, (uint32_t)hud_real_w); hud_real_w = 0; }
+/* run f with the game told the screen is 4:3, if it's wider (and not already told) */
+static void on_43_strip(CPU *c, void (*f)(CPU *)) {
+    int W = (int)RD32(SCREEN_W), H = (int)RD32(SCREEN_H);
+    if (hud_real_w || W * 3 <= H * 4 || H <= 0) { f(c); return; }
+    hud_begin(W, H);
+    f(c);
+    hud_end();
+}
+void hook_hud_init(CPU *c) { on_43_strip(c, f_004CE720_orig); }
+
+/* 0x4CE5E0 (race set-up, 0x4e79b0 and 0x4f73b0): the HUD's five font sizes, 0x7cb068..0x7cb078,
+ * in proportion to the screen width (1.8 .. 0.75 at 960 wide). Scaled to the 4:3 strip after
+ * it runs: run on the strip, its font set-up (0x52f560) would take the strip's width as the
+ * screen's and drop the text of the right-hand elements. */
+#define HUD_FONTS 0x7cb068u
+void hook_hud_fonts(CPU *c) {
+    f_004CE5E0_orig(c);
+    int W = screen_w(), H = (int)RD32(SCREEN_H);
+    if (W * 3 <= H * 4 || H <= 0) return;
+    float k = (H * 4 + 1) / 3 / (float)W;
+    for (int i = 0; i < 5; i++) WRF32(HUD_FONTS + 4u * i, RDF32(HUD_FONTS + 4u * i) * k);
+}
+
+/* 0x4CF3C0: the HUD's draw. About 25 functions under it place things straight from the screen
+ * width (boxes at fractions of W, text at W/640, ...), so while it runs the game is told the
+ * screen is 4:3 (0x853a98 = H * 4/3) and lays everything out on that strip; the renderer
+ * (glide.c, glide_hud_*) moves what it draws: each element to its edge (hud_rect, below),
+ * anything else to the centre. */
+extern int glide_hud_on; extern float glide_hud_dx, glide_hud_w43;
+void hook_hud_draw(CPU *c) {
+    int W = (int)RD32(SCREEN_W), H = (int)RD32(SCREEN_H);
+    if (W * 3 <= H * 4 || H <= 0) { f_004CF3C0_orig(c); return; }
+    int w43 = (H * 4 + 1) / 3;
+    hud_begin(W, H);
+    glide_hud_w43 = (float)w43; glide_hud_dx = hud_off / 2; glide_hud_on = 1;
+    f_004CF3C0_orig(c);
+    glide_hud_on = 0;
+    hud_end();
+}
+
+/* 0x4CEED0(eax = element, edx = layout, ebx = dest): copies the element's pixel rect {y0, x0,
+ * y1, x1} (hud_layout: already at its edge of the real screen). Each element's draw starts
+ * with it: give the element its rect on the 4:3 strip and have the renderer move what follows
+ * by the element's shift. */
+static float hud_shift(uint32_t element, uint32_t layout) {
+    uint32_t a = HUD_TABLE + 160u * element + 32u * layout;
+    float cx = (RDF32(a + 4) + RDF32(a + 12)) / 2;
+    return cx < 1.0f / 3 ? 0 : cx > 2.0f / 3 ? hud_off : hud_off / 2;
+}
+void hook_hud_rect(CPU *c) {
+    uint32_t element = c->r[EAX], layout = c->r[EDX], dest = c->r[EBX];
+    f_004CEED0_orig(c);
+    if (!hud_real_w || element >= 16 || layout >= 5) return;   /* (also during the HUD's init: the map's
+                                                                  outline is laid out there) */
+    float dx = hud_shift(element, layout);
+    WRF32(dest + 4, RDF32(dest + 4) - dx); WRF32(dest + 12, RDF32(dest + 12) - dx);
+    if (glide_hud_on) glide_hud_dx = dx;
+}
+
+/* Text: an element's strings are laid out by 0x52F670(eax = string, edx = x, ebx = y) into the
+ * font library's own objects and all drawn at the end of the HUD by 0x52F810. So the element's
+ * shift goes into x when a string is laid out, and the flush draws with none. */
+/* (the font library drops glyphs past the screen width it reads: the real one for both) */
+void hook_hud_text(CPU *c) {
+    if (!glide_hud_on || !hud_real_w) { f_0052F670_orig(c); return; }
+    c->r[EDX] += (uint32_t)(int32_t)lrintf(glide_hud_dx);
+    uint32_t w43 = RD32(SCREEN_W);
+    WR32(SCREEN_W, (uint32_t)hud_real_w);
+    f_0052F670_orig(c);
+    WR32(SCREEN_W, w43);
+}
+void hook_text_flush(CPU *c) {
+    float dx = glide_hud_dx; glide_hud_dx = 0;
+    uint32_t w = RD32(SCREEN_W);
+    if (hud_real_w) WR32(SCREEN_W, (uint32_t)hud_real_w);
+    f_0052F810_orig(c);
+    WR32(SCREEN_W, w);
+    glide_hud_dx = dx;
+}
+
+/* 0x4D09B0: drawn after the HUD, at fixed 640x480 positions times the HUD's scales: the start
+ * lights. The same 4:3 strip, centred. */
+void hook_hud_lights(CPU *c) {
+    int W = (int)RD32(SCREEN_W), H = (int)RD32(SCREEN_H);
+    if (W * 3 <= H * 4 || H <= 0) { f_004D09B0_orig(c); return; }
+    int w43 = (H * 4 + 1) / 3;
+    hud_begin(W, H);
+    glide_hud_w43 = (float)w43; glide_hud_dx = (float)(W - w43) / 2; glide_hud_on = 1;
+    f_004D09B0_orig(c);
+    glide_hud_on = 0;
+    hud_end();
 }

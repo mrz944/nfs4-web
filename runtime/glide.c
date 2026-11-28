@@ -88,8 +88,13 @@ static void emit_tri(const GVert v[3]) {
     cur->cmds[cur->ncmds - 1].count += 3;
 }
 
+/* Widescreen HUD (widescreen.c): while the game draws its HUD on a wide screen it is told the
+ * screen is 4:3 (H * 4/3 wide), and each element is moved here to its edge of the real screen. */
+int glide_hud_on; float glide_hud_dx, glide_hud_w43;
+
 static void read_vertex(uint32_t p, GVert *o) {
     o->x = RF(p + (uint32_t)voff[P_XY]); o->y = RF(p + (uint32_t)voff[P_XY] + 4);
+    if (glide_hud_on) o->x += glide_hud_dx;
     if (origin_lower) o->y = (float)win_h - o->y;
     float oow = 1.0f;
     if (voff[P_Q] >= 0) oow = RF(p + (uint32_t)voff[P_Q]);
@@ -518,6 +523,10 @@ GL_(ClipWindow) {
     (void)c;
     int16_t cl[4] = { (int16_t)A(0), (int16_t)A(1), (int16_t)A(2), (int16_t)A(3) };
     if (origin_lower) { int16_t y0 = (int16_t)(win_h - cl[3]), y1 = (int16_t)(win_h - cl[1]); cl[1] = y0; cl[3] = y1; }
+    if (glide_hud_on) {                       /* the HUD's clip: the 4:3 strip = the screen, else moved */
+        if (cl[0] <= 0 && cl[2] >= (int)glide_hud_w43 - 1) { cl[0] = 0; cl[2] = (int16_t)win_w; }
+        else { cl[0] = (int16_t)(cl[0] + glide_hud_dx); cl[2] = (int16_t)(cl[2] + glide_hud_dx); }
+    }
     memcpy(st.clip, cl, sizeof cl); state_changed(); return 0;
 }
 GL_(CullMode) { (void)c; cull_mode = (int)A(0); return 0; }

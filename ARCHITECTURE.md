@@ -73,6 +73,28 @@ sizes (the mirror, `0x853a70`: the HUD's mirror rect × h/4) are left alone. Cam
 factor on x. Everything else reads the focal lengths `0x5b0950`/`0x5b0954` (projection,
 culling); only camera type 8 (`0x43a650`) writes them again, from a saved copy at `0x660fa8`.
 
+**HUD** (`runtime/widescreen.c`, hooks `hud_*`; `glide.c` `glide_hud_*`). The HUD has 16
+elements in 5 layouts (Options › Heads Up Display, `0x7c3d6c`); each element's rect is a fraction
+of the screen, `{y0, x0, y1, x1}` at `0x7cb0bc + element·160 + layout·32`, turned into pixels at
+`+0x10` by `0x4d0550` (x · W, y · H; W, H = `0x853a98`/`0x853a9c`). About 25 drawing functions also
+place things straight from W (boxes, text at W/640, needles), and the font sizes
+(`0x7cb068`–`0x7cb078`, set by `0x4ce5e0` at race set-up) follow W too. On a screen wider than 4:3:
+- the rects are laid out on a 4:3 strip (H·4/3 wide), each element moved to the edge its centre
+  is nearest (left third, right third, else centred) (`hud_layout`);
+- the HUD's set-up (`0x4ce720`) and draw (`0x4cf3c0`), and the start lights (`0x4d09b0`), run
+  with the game told the screen is 4:3 (`0x853a98` = H·4/3), so every formula lays out on the
+  strip; the renderer adds an x shift to what they draw: an element fetching its rect
+  (`0x4ceed0`, which the element functions all start with) sets the shift to its edge's, and its
+  rect is handed back on the strip; a clip window over the whole strip becomes the screen;
+- text is laid out into the font library's own objects (`0x52f670`, x in edx) and drawn at the end
+  of the HUD (`0x52f810`): the element's shift goes into x at layout, the flush draws unshifted,
+  and both see the real width (the font library drops glyphs past the width it reads);
+- the font sizes are scaled by (H·4/3)/W after `0x4ce5e0` (run on the strip, its font set-up
+  would take the strip as the screen and drop the right-hand elements' text).
+At the same height the HUD is then the 4:3 one, pixel for pixel in size (checked against a
+temporary 960x720 mode). Not covered: the in-race menu (pause, `0x49dxxx`–`0x49fxxx`), still
+stretched; its mouse hit-testing would need the cursor remapped as well.
+
 **Wide modes** (`runtime/widescreen.c`, hooks `mode_list` and `mode_lookup`). The game listed and
 looked up exact 4:3 modes only, and saves only the width. The Options list (`0x727524` count, at
 most 20; 276-byte entries from `0x727528`: `{mode number, w, h, depth, buffers ok, label}`) is
@@ -101,6 +123,11 @@ can't meet a stale `gen/`. Production needs the same re-lift after a merge.
 |---|---|---|
 | `view_setup` (`runtime/widescreen.c`) | `0x453F10` | view and projection setup (x, y, w, h, fov, n, flip; floats on the stack, `ret 0x1c`), one caller `0x539f23`. `RT_WS_LOG=1` logs each distinct call |
 | `camera_view` (`runtime/widescreen.c`) | `0x539F80` | a camera's view: record and fov (`0x539e10`: 90°, 75° with View Angle `0x7c3d50` = 1, +15° with Wide Screen; halved), then the camera's zoom (`[camera + 0x54]`) if any: Hor+ for the zoom too |
+| `hud_layout` | `0x4D0550` | HUD element rects → pixels: on the 4:3 strip, moved to their edge |
+| `hud_init`, `hud_draw`, `hud_lights` | `0x4CE720`, `0x4CF3C0`, `0x4D09B0` | HUD set-up, draw, start lights: run with the game told the screen is 4:3 |
+| `hud_rect` | `0x4CEED0` | an element's rect, at the start of its draw: on the strip, and the renderer's shift for what follows |
+| `hud_text`, `text_flush` | `0x52F670`, `0x52F810` | HUD text: the element's shift into x at layout; drawn unshifted |
+| `hud_fonts` | `0x4CE5E0` | the HUD's font sizes, scaled to the strip |
 | `mode_list` (`runtime/widescreen.c`) | `0x51A390` | the screen modes for Options › Graphics: all aspects, wide widths saved as `w \| h << 16` |
 | `mode_lookup` (`runtime/widescreen.c`) | `0x51A530` | saved width and depth → mode record: exact size, same aspect, then 4:3 |
 

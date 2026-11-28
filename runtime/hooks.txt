@@ -5,3 +5,11 @@
 51a390 mode_list      # widescreen.c: lists the screen modes for Options > Graphics (callback in eax)
 51a530 mode_lookup    # widescreen.c: the saved width (eax) and depth (edx) -> mode record number
 539f80 camera_view    # widescreen.c: sets a camera's view (record, fov), then the camera's own zoom if it has one
+4d0550 hud_layout     # widescreen.c: HUD element rects, fractions of the screen -> pixels
+4ce720 hud_init       # widescreen.c: the HUD's scales from the screen size (x: W/640, y: H/480, ...)
+4cf3c0 hud_draw       # widescreen.c: draws the HUD (both kinds, 0x4cf560 and 0x4cf750)
+4ceed0 hud_rect       # widescreen.c: copies an element's rect (eax element, edx layout, ebx dest)
+52f670 hud_text       # widescreen.c: lays out a string at (edx, ebx) for the end-of-HUD text flush
+52f810 text_flush     # widescreen.c: draws the laid-out strings
+4d09b0 hud_lights     # widescreen.c: the start lights, at 640x480 positions times the HUD scales
+4ce5e0 hud_fonts      # widescreen.c: the HUD's font sizes from the screen width
