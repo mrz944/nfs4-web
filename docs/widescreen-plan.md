@@ -30,7 +30,7 @@ A player with an old config.dat keeps their 4:3 mode; nothing changes until they
 | P2 | Wide modes offered and selectable | ☑ 2026-11-27 |
 | P3 | Hor+ projection | ☑ 2026-11-27 (replay TV cameras: check in P6) |
 | P4 | Culling, clipping, effects at the new edges | ☑ 2026-11-28 (nothing to change) |
-| P5 | HUD and 2D overlays | ☐ |
+| P5 | HUD and 2D overlays | ☑ 2026-11-28 |
 | P6 | Mirror, split screen, replays, pause and race-end screens | ☐ |
 | P7 | Page, defaults, settings migration | ☐ |
 | P8 | Frame rate and pacing (Vulkan Thrash) | ☐ |
@@ -286,7 +286,28 @@ or the 2D draw routines taking 640x480 coordinates) and change the horizontal sc
 - an option to keep the HUD inside the 4:3 centre (some players prefer it) if it's cheap.
 
 Prefer doing this in the game's own 2D code (hooks) over guessing in the renderer which
-triangles are HUD. **Done when**: HUD looks right at 16:9 and 16:10 and unchanged at 4:3. **Findings**:
+triangles are HUD. **Done when**: HUD looks right at 16:9 and 16:10 and unchanged at 4:3. **Findings** (2026-11-28):
+
+- Done with 8 hooks (ARCHITECTURE.md "HUD"): element rects on a 4:3 strip anchored to the edge
+  their centre is nearest; the HUD's set-up, draw and start lights run with the game told the
+  screen is H·4/3 wide, the renderer shifting each element's draws (the shift is set when the
+  element fetches its rect, `0x4ceed0`); text gets its shift at layout (`0x52f670`) since it is
+  flushed at the end of the HUD (`0x52f810`); font sizes (`0x4ce5e0`, race set-up) scaled.
+- Checked natively against a temporary 960x720 mode (4:3 at the same height): at 1280x720 the
+  boxes, text, gauges, needles and start lights are the same size, the left elements at the left
+  edge, damage and gauges at the right, lights centred. Also 1920x1200, Wide Screen on at 16:9
+  (HUD over the bars), split screen at 1280x720 (both players' HUDs, maps on the right), and 4:3
+  unchanged (the hooks do nothing at 4:3). Frames: `build/baseline/p5-*`.
+- Pitfalls met: the list entries' x scale (W/640, `0x7cb088`) and font sizes are separate from
+  the rects; text is queued; the font library culls glyphs past the width it reads; the map's
+  outline is laid out during the HUD init, so rects must be on the strip there too.
+- **Open: the in-race menu** (pause and probably the race-end screens: `0x49dxxx`–`0x49fxxx`, the
+  Modern Patch's "Version 4.50" overlay) is still drawn at full width, stretched but usable.
+  Pillarboxing it needs its mouse hit-testing remapped too (the cursor is in screen pixels).
+  **Decided (user, 2026-11-28): it stays stretched.** The option to keep the HUD inside the 4:3
+  centre: **not wanted**, the HUD stays anchored to the edges.
+- Loading screens are drawn in the 640x480 menu mode before the race mode starts: pillarboxed
+  by the page, nothing to do.
 
 ## P6: the rest of the race screen
 
